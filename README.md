@@ -2306,3 +2306,2127 @@ AS
 ---
 
 By combining **SQL fundamentals** with **Snowflake’s cloud-native features**, you can build scalable, high-performance data pipelines. Always pair query optimization with proper schema design and Snowflake-specific tools like clustering and time travel.
+
+---
+Here are detailed answers to the interview questions, tailored to **Snowflake** and general SQL principles:
+
+---
+
+### **1. How do you optimize a query joining large tables in Snowflake?**
+
+#### **Key Optimization Strategies**:
+1. **Clustering Keys**:
+   - Define clustering keys on columns used in `JOIN`, `WHERE`, or `GROUP BY` clauses to reduce data scanned.
+   - Example:
+     ```sql
+     ALTER TABLE large_table CLUSTER BY (region, sale_date);
+     ```
+
+2. **Join Order & Type**:
+   - Join small tables first to reduce intermediate result sizes.
+   - Use `BROADCAST` hints for small dimension tables:
+     ```sql
+     SELECT /*+ BROADCAST(dim_table) */ ...
+     ```
+
+3. **Materialized Views**:
+   - Precompute expensive joins/aggregations:
+     ```sql
+     CREATE MATERIALIZED VIEW sales_summary AS
+     SELECT region, SUM(amount) AS total_sales
+     FROM sales
+     GROUP BY region;
+     ```
+
+4. **Prune Unnecessary Data**:
+   - Filter early with `WHERE` clauses to reduce rows processed.
+   - Select only required columns (avoid `SELECT *`).
+
+5. **Query Profiling**:
+   - Use `EXPLAIN` to analyze execution plans:
+     ```sql
+     EXPLAIN USING TABULAR SELECT * FROM large_table WHERE date = '2023-01-01';
+     ```
+
+6. **Result Caching**:
+   - Reuse cached results for repetitive queries:
+     ```sql
+     SET query_tag = 'cached_query';
+     SELECT * FROM large_table WHERE date = '2023-01-01';
+     -- Later:
+     SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+     ```
+
+7. **Warehouse Scaling**:
+   - Use multi-cluster warehouses for high concurrency:
+     ```sql
+     CREATE WAREHOUSE elastic_wh 
+     MAX_CLUSTER_COUNT = 5;
+     ```
+
+---
+
+### **2. Explain the difference between a view and a materialized view.**
+
+| Feature               | **View**                                  | **Materialized View**                          |
+|-----------------------|-------------------------------------------|------------------------------------------------|
+| **Storage**           | Virtual (no physical storage)             | Stores precomputed results on disk             |
+| **Performance**       | Slow for complex queries (executed at runtime) | Fast (results cached)                          |
+| **Data Freshness**    | Real-time (reflects current table data)   | Stale until refreshed (auto-refreshed in Snowflake) |
+| **Use Case**          | Simplify complex queries or security views| Speed up frequently run queries on large datasets |
+| **Refresh**           | No refresh needed                         | Automatically refreshed when base data changes |
+
+#### **Example**:
+- **View**:
+  ```sql
+  CREATE VIEW active_users AS
+  SELECT * FROM users WHERE status = 'active';
+  ```
+- **Materialized View**:
+  ```sql
+  CREATE MATERIALIZED VIEW sales_summary AS
+  SELECT region, SUM(amount) AS total_sales
+  FROM sales
+  GROUP BY region;
+  ```
+
+---
+
+### **3. Write a query to find duplicate records in a table.**
+
+#### **Method 1: Using GROUP BY and HAVING**
+Finds duplicates based on specific columns (e.g., `name`, `email`):
+```sql
+SELECT name, email, COUNT(*) AS duplicate_count
+FROM users
+GROUP BY name, email
+HAVING COUNT(*) > 1;
+```
+
+#### **Method 2: Using ROW_NUMBER() Window Function**
+Identifies full duplicate rows (all columns identical):
+```sql
+WITH RankedRows AS (
+  SELECT *, 
+         ROW_NUMBER() OVER (PARTITION BY name, email ORDER BY id) AS rn
+  FROM users
+)
+SELECT *
+FROM RankedRows
+WHERE rn > 1;
+```
+
+#### **Method 3: Using QUALIFY (Snowflake-Specific)**
+Simplifies filtering duplicates directly:
+```sql
+SELECT *
+FROM users
+QUALIFY ROW_NUMBER() OVER (PARTITION BY name, email ORDER BY id) > 1;
+```
+
+---
+Here’s a structured overview of **Snowflake basics** covering **warehouses**, **roles**, **stages**, and **file formats**, with examples and best practices:
+
+---
+
+### **1. Warehouses (Compute Clusters)**
+**Purpose**:  
+Snowflake's compute layer responsible for executing queries (e.g., SELECT, INSERT, JOIN).  
+- **Separation of Compute & Storage**: Warehouses scale independently from data storage.  
+- **Multi-Cluster Support**: Handle concurrent workloads (e.g., separate warehouses for ETL and reporting).  
+
+#### **Key Concepts**:
+- **Warehouse Types**:
+  - **Standard**: General-purpose compute (e.g., `XSMALL` to `X LARGE`).  
+  - **Snowpark**: Optimized for Python/Java/Scala code execution.  
+  - **Data Exchange**: For data sharing with external accounts.  
+
+- **Auto-Suspend/Resume**:  
+  Save costs by auto-suspending idle warehouses.  
+  ```sql
+  CREATE WAREHOUSE reporting_wh
+  WAREHOUSE_SIZE = 'MEDIUM'
+  AUTO_SUSPEND = 60; -- Suspend after 60 seconds of inactivity
+  ```
+
+- **Scaling**:
+  - **Single-Cluster**: Fixed size (e.g., `MEDIUM`).  
+  - **Multi-Cluster**: Auto-scale based on workload.  
+    ```sql
+    CREATE WAREHOUSE elastic_wh
+    WAREHOUSE_SIZE = 'XSMALL'
+    MAX_CLUSTER_COUNT = 5;
+    ```
+
+**Best Practice**:  
+Use smaller warehouses for lightweight queries and larger ones for bulk data processing.
+
+---
+
+### **2. Roles (Access Control)**
+**Purpose**:  
+Role-Based Access Control (RBAC) manages permissions for users and objects.  
+
+#### **Default Roles**:
+| Role           | Permissions                          |
+|----------------|--------------------------------------|
+| **ACCOUNTADMIN** | Full administrative control         |
+| **SYSADMIN**     | Manages warehouses, databases, roles |
+| **USER**         | Default role for new users          |
+
+#### **Custom Roles**:
+```sql
+-- Create a role
+CREATE ROLE analyst;
+
+-- Grant privileges
+GRANT SELECT ON TABLE sales_data TO ROLE analyst;
+
+-- Assign role to a user
+GRANT ROLE analyst TO USER john_doe;
+```
+
+#### **Role Hierarchy**:
+```sql
+-- Grant a role to another role
+GRANT ROLE analyst TO ROLE data_scientist;
+```
+
+**Best Practice**:  
+Follow the **principle of least privilege**—grant only necessary permissions.
+
+---
+
+### **3. Stages (Data Storage for Loading)**
+**Purpose**:  
+Stages store data files (e.g., CSV, JSON, Parquet) before loading into Snowflake tables.  
+
+#### **Types of Stages**:
+1. **Internal Stages**:
+   - Managed by Snowflake.  
+   - Types:  
+     - **User Stage**: Private to a user (`@~`).  
+     - **Table Stage**: Private to a table (`@%table_name`).  
+     - **Named Internal Stage**: Custom stage for shared access.
+
+   ```sql
+   -- Create a named internal stage
+   CREATE STAGE my_stage;
+
+   -- Upload files to the stage (CLI)
+   PUT file:///path/to/data.csv @my_stage/data/;
+   ```
+
+2. **External Stages**:
+   - Point to external cloud storage (e.g., AWS S3, Azure Blob).  
+   - Requires credentials and storage integration.  
+
+   ```sql
+   -- Create external stage pointing to S3
+   CREATE STAGE s3_stage
+   URL = 's3://my-bucket/data/'
+   CREDENTIALS = (AWS_KEY_ID='...' AWS_SECRET_KEY='...');
+   ```
+
+#### **Loading Data**:
+```sql
+-- Load data from a stage into a table
+COPY INTO sales_table
+FROM @my_stage/data/
+FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1);
+```
+
+**Best Practice**:  
+Use **external stages** for large datasets and **internal stages** for small, transient files.
+
+---
+
+### **4. File Formats**
+**Purpose**:  
+Define how Snowflake parses data files (e.g., CSV, JSON, Parquet).  
+
+#### **Supported Formats**:
+| Format    | Use Case                        |
+|-----------|---------------------------------|
+| CSV       | Simple tabular data             |
+| JSON      | Semi-structured data            |
+| Parquet   | Columnar format for large data  |
+| ORC       | Hadoop ecosystem compatibility  |
+| Avro      | Schema evolution support        |
+
+#### **Create File Format**:
+```sql
+-- CSV format
+CREATE FILE FORMAT csv_format
+TYPE = CSV
+FIELD_DELIMITER = ','
+SKIP_HEADER = 1;
+
+-- JSON format
+CREATE FILE FORMAT json_format
+TYPE = JSON;
+
+-- Parquet format
+CREATE FILE FORMAT parquet_format
+TYPE = PARQUET;
+```
+
+#### **Reference in COPY INTO**:
+```sql
+COPY INTO customers
+FROM @my_stage/customers/
+FILE_FORMAT = csv_format;
+```
+
+**Best Practice**:  
+Use **Parquet** or **ORC** for large-scale data due to compression and columnar efficiency.
+
+---
+
+### **Summary Table**
+| Component       | Key Features                                      | Best Use Case                          |
+|-----------------|---------------------------------------------------|----------------------------------------|
+| **Warehouses**  | Scalable compute clusters, auto-suspend, multi-cluster | Query execution, ETL, reporting        |
+| **Roles**       | RBAC, hierarchy, granular permissions             | Security, access control               |
+| **Stages**      | Internal/external storage for data files          | Data ingestion (bulk loading)          |
+| **File Formats**| CSV, JSON, Parquet, ORC, Avro                     | Parsing structured/semi-structured data|
+
+---
+
+### **Snowflake-Specific Tips**
+- **Time Travel**: Recover dropped tables or historical data (up to 90 days).  
+  ```sql
+  UNDROP TABLE sales_data;
+  ```
+- **Zero-Copy Cloning**: Create instant copies for testing.  
+  ```sql
+  CREATE TABLE test_sales CLONE production_sales;
+  ```
+- **Result Caching**: Reuse query results for 24 hours.  
+  ```sql
+  SET query_tag = 'cached_query';
+  SELECT * FROM large_table WHERE date = '2023-01-01';
+  ```
+
+By mastering these core components, you can efficiently manage **data pipelines**, **security**, and **query performance** in Snowflake.
+---
+
+### **Summary of Best Practices**
+- **Optimize Joins**: Use clustering keys, filter early, and leverage materialized views.
+- **Views vs. Materialized Views**: Use views for real-time logic and materialized views for performance-critical queries.
+- **Detect Duplicates**: Use `GROUP BY HAVING`, `ROW_NUMBER()`, or `QUALIFY` based on your needs.
+
+By applying these strategies, you can ensure **efficient Snowflake queries**, **scalable data models**, and **clean data pipelines**.
+---
+Here’s a structured guide to **using Snowpark in Python** to interact with **Snowflake data** using **DataFrames**, including setup, transformations, and best practices.
+
+---
+
+### **1. Setup & Configuration**
+#### **Install Snowpark Python Package**:
+```bash
+pip install snowflake-snowpark-python
+```
+
+#### **Configure Connection**:
+Use a `connection.json` file or environment variables:
+```python
+from snowflake.snowpark import Session
+
+connection_params = {
+    "account": "<your_account>",
+    "user": "<your_user>",
+    "password": "<your_password>",
+    "role": "<your_role>",
+    "warehouse": "<your_warehouse>",
+    "database": "<your_database>",
+    "schema": "<your_schema>"
+}
+
+session = Session.builder.configs(connection_params).create()
+```
+
+---
+
+### **2. Key Concepts in Snowpark**
+#### **Snowpark DataFrame vs. Pandas DataFrame**:
+- **Snowpark DataFrames**: Lazily evaluated, operations are pushed to Snowflake (not loaded into memory).  
+- **Pandas DataFrames**: In-memory, single-node processing (suitable for small datasets).  
+
+#### **Core Operations**:
+- **Create DataFrame**: From Snowflake tables, stages, or queries.  
+- **Transform**: Use DataFrame APIs (e.g., `filter`, `select`, `agg`).  
+- **Action**: Trigger execution (e.g., `show()`, `collect()`).  
+
+---
+
+### **3. Working with DataFrames**
+#### **Step 1: Read Data**
+- **From Snowflake Table**:
+  ```python
+  df = session.table("SALES_DATA")
+  df.show()
+  ```
+
+- **From External Stage (CSV/JSON/Parquet)**:
+  ```python
+  df = session.read.option("pattern", ".*sales.*.csv").csv("@MY_STAGE/sales/")
+  df = df.to_df(["DATE", "REGION", "AMOUNT"])  # Rename columns
+  ```
+
+#### **Step 2: Transform Data**
+- **Select Columns**:
+  ```python
+  df_selected = df.select("DATE", "AMOUNT")
+  ```
+
+- **Filter Rows**:
+  ```python
+  df_filtered = df.filter((df.AMOUNT > 1000) & (df.REGION == "APAC"))
+  ```
+
+- **Aggregate Data**:
+  ```python
+  from snowflake.snowpark.functions import col, sum as _sum
+
+  df_agg = df.group_by("REGION").agg(_sum(col("AMOUNT")).alias("TOTAL_SALES"))
+  ```
+
+- **Join DataFrames**:
+  ```python
+  df_regions = session.table("REGIONS")
+  df_joined = df.join(df_regions, df["REGION"] == df_regions["NAME"], join_type="inner")
+  ```
+
+#### **Step 3: Save Results**
+- **Write to Table**:
+  ```python
+  df_agg.write.mode("overwrite").save_as_table("REGIONAL_SALES")
+  ```
+
+- **Create Temporary View**:
+  ```python
+  df.create_or_replace_temp_view("TEMP_SALES_VIEW")
+  ```
+
+---
+
+### **4. Advanced Features**
+#### **User-Defined Functions (UDFs)**
+Define custom logic in Python:
+```python
+from snowflake.snowpark.functions import udf
+from snowflake.snowpark.types import IntegerType, StringType
+
+@udf(name="ADD_TAX", return_type=IntegerType(), input_types=[IntegerType()])
+def add_tax(amount: int) -> int:
+    return int(amount * 1.1)
+
+# Use in DataFrame
+df.withColumn("AMOUNT_WITH_TAX", add_tax(col("AMOUNT"))).show()
+```
+
+#### **Stored Procedures**
+Encapsulate logic for reuse:
+```python
+def run_etl(session: Session):
+    try:
+        df = session.table("RAW_SALES")
+        df_cleaned = df.filter(col("AMOUNT") > 0)
+        df_cleaned.write.mode("overwrite").save_as_table("CLEANED_SALES")
+        return "Success"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+session.sproc.register(run_etl, name="RUN_ETL_PIPELINE", is_permanent=True, stage_location="@MY_STAGE/sp")
+```
+
+#### **Call Stored Procedure**:
+```sql
+CALL RUN_ETL_PIPELINE();
+```
+
+---
+
+### **5. Query Optimization**
+- **Clustering Keys**:
+  ```python
+  session.sql("""
+  CREATE TABLE CLEANED_SALES (
+    DATE DATE,
+    AMOUNT INT
+  ) CLUSTER BY (DATE)
+  """).collect()
+  ```
+
+- **Caching**:
+  ```python
+  df_cached = df.cache_result()
+  ```
+
+- **Push Down Filters**:
+  Avoid converting to Pandas until final step to leverage Snowflake’s compute.
+
+---
+
+### **6. Complete ETL Pipeline Example**
+```python
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, sum as _sum
+
+def etl_pipeline(session: Session):
+    try:
+        # Extract
+        df_sales = session.read.option("pattern", ".*sales.*.csv").csv("@MY_STAGE/sales/")
+        df_regions = session.table("REGIONS")
+
+        # Transform
+        df_cleaned = df_sales.filter(col("_c2").cast("int") > 0)  # Filter invalid amounts
+        df_joined = df_cleaned.join(df_regions, df_cleaned["_c1"] == df_regions["NAME"])
+        df_agg = df_joined.group_by("CONTINENT").agg(_sum(col("_c2")).alias("TOTAL_SALES"))
+
+        # Load
+        df_agg.write.mode("overwrite").save_as_table("GLOBAL_SALES_SUMMARY")
+        return "Pipeline Success"
+    except Exception as e:
+        return f"Pipeline Failed: {str(e)}"
+
+# Register and call as stored procedure
+session.sproc.register(etl_pipeline, name="RUN_ETL", is_permanent=True, stage_location="@MY_STAGE/sp")
+session.call("RUN_ETL")
+```
+
+---
+
+### **7. Best Practices**
+1. **Use Lazy Evaluation**: Chain transformations before calling actions (e.g., `collect()`).  
+2. **Minimize Data Transfer**: Avoid `.to_pandas()` unless necessary.  
+3. **Session Management**: Close sessions properly:
+   ```python
+   session.close()
+   ```
+4. **Logging**: Use Python’s `logging` module for debugging.  
+5. **Security**: Store credentials in environment variables or secret managers (e.g., AWS Secrets Manager).
+
+---
+
+### **8. Automation**
+- **Snowflake Tasks**:
+  ```sql
+  CREATE TASK RUN_ETL_DAILY
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE = 'USING CRON 0 8 * * * UTC'
+  AS
+    CALL RUN_ETL();
+  ```
+
+- **Apache Airflow**:
+  Use Snowflake hook to trigger stored procedures:
+  ```python
+  from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
+
+  def run_snowpark_etl():
+      hook = SnowflakeHook(snowflake_conn_id="snowflake_conn")
+      hook.run("CALL RUN_ETL()")
+  ```
+
+---
+
+By leveraging **Snowpark’s DataFrame API**, you can build scalable, efficient data pipelines directly in Python while harnessing Snowflake’s cloud-native compute and storage capabilities. Always combine this with Snowflake’s features like clustering and materialized views for optimal performance.
+
+---
+Here’s a structured guide to **integrating Snowpark** with **Pandas** or **Spark-like** operations for hybrid data engineering workflows, including best practices, code examples, and performance considerations.
+
+---
+
+### **1. Snowpark vs. Pandas vs. PySpark**
+| Feature               | **Snowpark**                          | **Pandas**                        | **PySpark**                         |
+|-----------------------|----------------------------------------|-----------------------------------|-------------------------------------|
+| **Execution Engine**  | Snowflake (cloud-native)               | Local (in-memory)                 | Distributed (Spark clusters)        |
+| **Scalability**       | Scales with Snowflake compute          | Limited to single machine         | Scales horizontally                 |
+| **Use Case**          | Cloud ETL, large-scale SQL/DataFrames  | Small datasets, quick analysis    | Big data processing (batch/stream)  |
+| **Data Transfer**     | Minimal (data stays in Snowflake)      | Full data loaded into memory      | Data stored in Spark cluster memory |
+
+---
+
+### **2. Integrating Snowpark with Pandas**
+#### **Scenario**:  
+You want to leverage Snowflake for initial data filtering/aggregation and then use Pandas for detailed analysis.
+
+#### **Steps**:
+1. **Extract Data in Snowpark**:
+   ```python
+   from snowflake.snowpark import Session
+
+   session = Session.builder.configs(connection_params).create()
+   snow_df = session.table("LARGE_SALES_DATA").filter(col("AMOUNT") > 1000)
+   ```
+
+2. **Convert to Pandas**:
+   ```python
+   pandas_df = snow_df.to_pandas()  # Triggers execution and pulls data
+   ```
+
+3. **Perform Pandas Operations**:
+   ```python
+   pandas_df["tax"] = pandas_df["AMOUNT"] * 0.1
+   pandas_df.groupby("REGION")["tax"].sum().plot(kind="bar")
+   ```
+
+#### **Best Practices**:
+- **Filter Early**: Use Snowpark to reduce data size before converting to Pandas.
+- **Memory Limits**: Avoid converting massive datasets to Pandas (risk of OOM errors).
+- **Caching**: Cache intermediate Snowpark results with `.cache_result()`.
+
+---
+
+### **3. Snowpark with PySpark (Spark-Like Operations)**
+#### **Scenario**:  
+You want to use Spark-like distributed processing but store data in Snowflake.
+
+#### **Integration Options**:
+1. **Read from Snowflake into Spark**:
+   ```python
+   spark = SparkSession.builder \
+       .appName("SnowflakeIntegration") \
+       .getOrCreate()
+
+   df = spark.read \
+       .format("snowflake") \
+       .options(**{
+           "sfURL": "https://<account>.snowflakecomputing.com",
+           "sfUser": "user",
+           "sfPassword": "password",
+           "sfDatabase": "DB",
+           "sfSchema": "SCHEMA",
+           "sfWarehouse": "WAREHOUSE"
+       }) \
+       .option("query", "SELECT * FROM LARGE_TABLE WHERE AMOUNT > 1000") \
+       .load()
+   ```
+
+2. **Write Back to Snowflake**:
+   ```python
+   df.write \
+       .format("snowflake") \
+       .options(**{
+           "sfURL": "https://<account>.snowflakecomputing.com",
+           "sfUser": "user",
+           "sfPassword": "password",
+           "sfDatabase": "DB",
+           "sfSchema": "SCHEMA",
+           "sfWarehouse": "WAREHOUSE"
+       }) \
+       .option("dbtable", "PROCESSED_DATA") \
+       .mode("overwrite") \
+       .save()
+   ```
+
+#### **Best Practices**:
+- **Push Down Predicates**: Filter data in Snowflake before loading into Spark.
+- **Use Parquet**: Leverage Snowflake’s `COPY INTO` to unload data in Parquet format for Spark.
+- **Warehouse Size**: Use large Snowflake warehouses for high-volume data transfers.
+
+---
+
+### **4. Hybrid Pipeline Example**
+#### **Use Case**:  
+Ingest raw data in Snowflake, clean with Snowpark, enrich with Pandas, and automate via Snowflake Tasks or Airflow.
+
+#### **Code Snippet**:
+```python
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col
+
+def hybrid_pipeline():
+    # Step 1: Snowpark for filtering/aggregation
+    session = Session.builder.configs(connection_params).create()
+    snow_df = session.table("RAW_SALES").filter(col("STATUS") == "COMPLETED")
+
+    # Step 2: Convert to Pandas for complex analysis
+    pandas_df = snow_df.to_pandas()
+    pandas_df["adjusted_amount"] = pandas_df["AMOUNT"] * 0.95  # Apply discount
+
+    # Step 3: Save back to Snowflake (via Snowpark or Pandas)
+    session.write_pandas(pandas_df, "ADJUSTED_SALES", auto_create_table=True)
+
+hybrid_pipeline()
+```
+
+#### **Automation**:
+- **Snowflake Task**:
+  ```sql
+  CREATE TASK run_hybrid_pipeline
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE = 'USING CRON 0 8 * * * UTC'
+  AS
+    CALL SYSTEM$EXECUTE_PYTHON_SCRIPT('hybrid_pipeline.py');
+  ```
+
+- **Airflow DAG**:
+  ```python
+  from airflow.operators.python_operator import PythonOperator
+
+  dag = DAG("daily_pipeline", schedule_interval="@daily", start_date=datetime(2023, 1, 1))
+  task = PythonOperator(task_id="run_pipeline", python_callable=hybrid_pipeline, dag=dag)
+  ```
+
+---
+
+### **5. Performance Optimization**
+| Area               | Strategy                                                                 |
+|--------------------|--------------------------------------------------------------------------|
+| **Data Transfer**   | Use `.filter()` and `.select()` in Snowpark before converting to Pandas. |
+| **Caching**         | Cache intermediate Snowpark results with `.cache_result()`.             |
+| **Batch Processing**| Use chunked writes for large Pandas DataFrames.                         |
+| **Warehouse Size**  | Use larger Snowflake warehouses for heavy transformations.              |
+| **Vectorization**   | Use NumPy/Pandas vectorized ops instead of loops.                       |
+
+---
+
+### **6. Error Handling & Logging**
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def safe_pipeline():
+    session = Session.builder.configs(connection_params).create()
+    try:
+        # Your code
+        logger.info("Pipeline started")
+        snow_df = session.table("RAW_DATA").filter(col("DATE") > "2023-01-01")
+        pandas_df = snow_df.to_pandas()
+        # Process...
+        logger.info("Pipeline completed")
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+safe_pipeline()
+```
+
+---
+
+### **7. When to Use Each Tool**
+| Scenario                             | Recommended Tool        |
+|--------------------------------------|--------------------------|
+| Small datasets, local analysis       | Pandas                   |
+| Large-scale cloud ETL                | Snowpark                 |
+| Distributed batch/streaming pipelines| PySpark + Snowflake      |
+| Interactive data exploration         | Snowpark + Pandas        |
+
+---
+
+By combining **Snowpark**, **Pandas**, and **PySpark**, you can build flexible, scalable pipelines that leverage the strengths of each tool. Always minimize data transfer between systems and use Snowflake’s clustering and caching features for optimal performance.
+---
+
+Here’s a breakdown of **Snowpark use cases** for **data transformations**, **machine learning**, and **ETL pipelines**, with examples, best practices, and real-world applications.
+
+---
+
+### **1. Data Transformations**
+#### **Use Case: Clean and Aggregate Sales Data**
+**Problem**:  
+You need to clean raw sales data (e.g., filter invalid entries, handle missing values), join with region metadata, and aggregate total sales per region.
+
+#### **Solution with Snowpark**:
+```python
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, sum as _sum
+
+def transform_sales_data(session: Session):
+    try:
+        # Step 1: Read raw CSV from Snowflake stage
+        raw_df = session.read.csv("@MY_STAGE/sales/sales.csv")
+        raw_df = raw_df.to_df(["DATE", "REGION_ID", "AMOUNT", "QUANTITY"])
+
+        # Step 2: Clean data
+        cleaned_df = (
+            raw_df
+            .filter((col("AMOUNT").is_not_null()) & (col("QUANTITY") > 0))
+            .with_column("AMOUNT", col("AMOUNT").cast("float"))
+            .with_column("QUANTITY", col("QUANTITY").cast("int"))
+        )
+
+        # Step 3: Join with regions table
+        regions_df = session.table("REGIONS")
+        joined_df = cleaned_df.join(regions_df, cleaned_df["REGION_ID"] == regions_df["ID"], join_type="inner")
+
+        # Step 4: Aggregate sales by region
+        agg_df = (
+            joined_df
+            .group_by("REGION_NAME")
+            .agg(_sum(col("AMOUNT")).alias("TOTAL_SALES"))
+        )
+
+        # Step 5: Save to target table
+        agg_df.write.mode("overwrite").save_as_table("SALES_SUMMARY")
+        return "Success"
+    except Exception as e:
+        session.rollback()
+        return f"Error: {str(e)}"
+
+# Register as a stored procedure
+session.sproc.register(transform_sales_data, name="TRANSFORM_SALES", is_permanent=True, stage_location="@MY_STAGE/sp")
+```
+
+#### **Best Practices**:
+- Use **clustering keys** on columns like `REGION_NAME` for faster aggregations.
+- Filter early to reduce data processed.
+- Use `.cache_result()` for reusable intermediate DataFrames.
+
+---
+
+### **2. Machine Learning (ML) Integration**
+#### **Use Case: Preprocess Data for ML Training**
+**Problem**:  
+You need to preprocess data (e.g., normalize features, encode categories) before exporting it for ML training.
+
+#### **Solution with Snowpark**:
+```python
+from snowflake.snowpark.functions import col, when
+from snowflake.snowpark import Session
+
+def preprocess_for_ml(session: Session):
+    try:
+        # Step 1: Load customer data
+        df = session.table("CUSTOMERS")
+
+        # Step 2: Clean and encode categorical data
+        df_cleaned = (
+            df
+            .filter(col("AGE").is_not_null() & col("INCOME").is_not_null())
+            .with_column("GENDER_CODE", when(col("GENDER") == "M", 0).otherwise(1))
+        )
+
+        # Step 3: Normalize numerical features
+        df_normalized = (
+            df_cleaned
+            .with_column("INCOME_NORM", (col("INCOME") - 30000) / 70000)  # Example min-max scaling
+        )
+
+        # Step 4: Save preprocessed data
+        df_normalized.write.mode("overwrite").save_as_table("ML_PREPROCESSED_DATA")
+        return "Success"
+    except Exception as e:
+        session.rollback()
+        return f"Error: {str(e)}"
+
+session.sproc.register(preprocess_for_ml, name="PREPROCESS_ML_DATA", is_permanent=True, stage_location="@MY_STAGE/sp")
+```
+
+#### **Integration with ML Tools**:
+- Export data to Pandas for training:
+  ```python
+  ml_df = session.table("ML_PREPROCESSED_DATA").to_pandas()
+  from sklearn.model_selection import train_test_split
+  X_train, X_test = train_test_split(ml_df, test_size=0.2)
+  ```
+
+- Use **Snowflake Cortex ML** for in-database model deployment:
+  ```sql
+  CREATE SNOWFLAKE.ML.MODEL customer_churn_model
+  AS (
+    SELECT * FROM ML_PREPROCESSED_DATA
+  )
+  TARGET_LABEL = 'CHURN'
+  FUNCTION_NAME = 'PREDICT_CHURN';
+  ```
+
+#### **Best Practices**:
+- Push preprocessing to Snowpark to avoid data movement.
+- Use **UDFs** for custom feature engineering.
+- Leverage **Cortex ML** for lightweight in-database models.
+
+---
+
+### **3. ETL Pipelines**
+#### **Use Case: Automate Daily Sales Pipeline**
+**Problem**:  
+Automate a daily pipeline to load new sales data, join with customer demographics, and update a dashboard-ready table.
+
+#### **Solution with Snowpark**:
+```python
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col
+
+def daily_sales_pipeline(session: Session):
+    try:
+        # Step 1: Load new sales data from stage
+        new_sales = session.read.csv("@MY_STAGE/sales/daily/")
+        new_sales = new_sales.to_df(["DATE", "CUSTOMER_ID", "AMOUNT"])
+
+        # Step 2: Join with customer demographics
+        customers = session.table("CUSTOMERS")
+        joined = new_sales.join(customers, "CUSTOMER_ID", join_type="inner")
+
+        # Step 3: Aggregate and enrich
+        enriched = joined.with_column("CATEGORY", when(col("AMOUNT") > 1000, "HIGH").otherwise("LOW"))
+        aggregated = enriched.group_by("CATEGORY").count()
+
+        # Step 4: Merge into dashboard table
+        dashboard = session.table("DASHBOARD_SALES")
+        merged = (
+            dashboard.merge(
+                aggregated,
+                dashboard["CATEGORY"] == aggregated["CATEGORY"],
+                when_matched_update=[...]
+            )
+        )
+        merged.write.mode("overwrite").save_as_table("DASHBOARD_SALES")
+        return "Pipeline completed"
+    except Exception as e:
+        session.rollback()
+        return f"Error: {str(e)}"
+
+session.sproc.register(daily_sales_pipeline, name="RUN_DAILY_PIPELINE", is_permanent=True, stage_location="@MY_STAGE/sp")
+```
+
+#### **Automation Options**:
+- **Snowflake Task**:
+  ```sql
+  CREATE TASK RUN_DAILY_ETL
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE = 'USING CRON 0 8 * * * UTC'
+  AS
+    CALL RUN_DAILY_PIPELINE();
+  ```
+
+- **Airflow DAG**:
+  ```python
+  from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
+
+  def run_pipeline():
+      hook = SnowflakeHook(snowflake_conn_id="snowflake_conn")
+      hook.run("CALL RUN_DAILY_PIPELINE()")
+
+  PythonOperator(task_id="run_etl", python_callable=run_pipeline, dag=dag)
+  ```
+
+#### **Best Practices**:
+- Use **merge** for upserts instead of full table overwrites.
+- Monitor pipeline health via `QUERY_HISTORY`.
+- Cache intermediate results with `.cache_result()`.
+
+---
+
+### **4. Best Practices Summary**
+| Area               | Practice                                                                 |
+|--------------------|--------------------------------------------------------------------------|
+| **Performance**    | Push transformations to Snowflake; avoid `.to_pandas()` for large data. |
+| **Security**       | Use least-privilege roles and secure credentials in secret managers.    |
+| **Error Handling** | Use `try-except` and `.rollback()` for transaction safety.              |
+| **Logging**        | Log success/failure events with Python’s `logging` module.              |
+| **Scalability**    | Use clustering keys and multi-cluster warehouses for high concurrency.  |
+
+---
+
+### **5. When to Use Snowpark**
+| Use Case                  | Recommendation                                                                 |
+|---------------------------|----------------------------------------------------------------------------------|
+| Small-scale transformations | Use Pandas for local processing.                                               |
+| Large-scale transformations | Use Snowpark for in-database processing.                                       |
+| ML Preprocessing            | Use Snowpark to clean/encode data, then export to Pandas or Spark.             |
+| Real-time ML predictions    | Use Snowflake Cortex ML or external model APIs via stored procedures.          |
+| ETL Pipelines               | Use Snowpark for scalable, automated pipelines with Snowflake Tasks or Airflow.|
+
+---
+
+By leveraging **Snowpark**, you can build **end-to-end data workflows**—from ingestion to transformation to ML—while staying within Snowflake’s secure, scalable environment. Always combine this with Snowflake’s native features like **clustering**, **materialized views**, and **result caching** for optimal performance.
+---
+
+Here’s a structured guide to **transforming data** and **creating UDFs** in **Snowpark**, with examples and best practices:
+
+---
+
+### **1. Transform Data: Calculate Average Salary per Department & Join**
+#### **Objective**:  
+Calculate **average salary per department** and join with a **departments table** to enrich results with department names.
+
+#### **Code Example**:
+```python
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, avg, udf
+
+# 1. Setup Snowpark Session
+connection_params = {
+    "account": "<your_account>",
+    "user": "<your_user>",
+    "password": "<your_password>",
+    "role": "<your_role>",
+    "warehouse": "<your_warehouse>",
+    "database": "<your_database>",
+    "schema": "<your_schema>"
+}
+session = Session.builder.configs(connection_params).create()
+
+try:
+    # 2. Read Tables
+    employees_df = session.table("EMPLOYEES")  # Columns: id, name, department_id, salary
+    departments_df = session.table("DEPARTMENTS")  # Columns: id, name
+
+    # 3. Aggregate Salaries by Department
+    avg_salary_df = (
+        employees_df
+        .group_by("department_id")
+        .agg(avg(col("salary")).alias("avg_salary"))
+    )
+
+    # 4. Join with Departments Table
+    joined_df = (
+        avg_salary_df.join(departments_df, avg_salary_df["department_id"] == departments_df["id"])
+        .select(departments_df["name"].alias("department_name"), avg_salary_df["avg_salary"])
+    )
+
+    # 5. Save to Target Table
+    joined_df.write.mode("overwrite").save_as_table("DEPARTMENT_AVG_SALARY")
+
+    print("Average salary per department calculated and saved.")
+except Exception as e:
+    session.rollback()
+    print(f"Error: {str(e)}")
+finally:
+    session.close()
+```
+
+#### **Key Concepts**:
+- **Group By & Aggregation**: Use `group_by` and `agg(avg(...))` for efficient aggregations.
+- **Join**: Use `join(...)` to enrich results with department names.
+- **Session Management**: Always close the session and handle exceptions with `rollback()`.
+
+---
+
+### **2. Create a Python UDF to Categorize Salary Ranges**
+#### **Objective**:  
+Create a **UDF** to categorize salaries into ranges (e.g., Low, Medium, High).
+
+#### **Code Example**:
+```python
+# 1. Define the UDF Function
+def categorize_salary(salary: float) -> str:
+    if salary < 50000:
+        return "Low"
+    elif 50000 <= salary < 100000:
+        return "Medium"
+    else:
+        return "High"
+
+# 2. Register the UDF in Snowpark
+salary_category_udf = udf(
+    categorize_salary,
+    return_type=StringType(),
+    input_types=[FloatType()],
+    name="CATEGORIZE_SALARY",
+    is_permanent=True,
+    stage_location="@MY_STAGE/udfs"
+)
+
+# 3. Apply the UDF to a DataFrame
+try:
+    employees_with_category = (
+        employees_df
+        .with_column("salary_category", salary_category_udf(col("salary")))
+        .select("name", "salary", "salary_category")
+    )
+
+    # Save results
+    employees_with_category.write.mode("overwrite").save_as_table("EMPLOYEE_SALARY_CATEGORIES")
+    print("Salary categories applied and saved.")
+except Exception as e:
+    session.rollback()
+    print(f"Error: {str(e)}")
+```
+
+#### **Key Concepts**:
+- **UDF Registration**: Use `udf(...)` to define return/input types and deploy to Snowflake.
+- **Apply UDF**: Use `with_column(...)` to add a new column based on the UDF.
+- **Permanent UDFs**: Set `is_permanent=True` and specify a stage for reuse across sessions.
+
+---
+
+### **3. Best Practices**
+#### **Performance Optimization**
+- **Clustering Keys**: Use clustering on `department_id` for faster joins/aggregations:
+  ```sql
+  ALTER TABLE EMPLOYEES CLUSTER BY (department_id);
+  ```
+- **Caching**: Cache intermediate DataFrames if reused:
+  ```python
+  employees_df.cache_result()
+  ```
+
+#### **Error Handling**
+- Use `try-except` blocks and `session.rollback()` for transaction safety.
+- Validate data (e.g., filter nulls) before transformations:
+  ```python
+  employees_df = employees_df.filter(col("salary").is_not_null())
+  ```
+
+#### **Security**
+- Use **least-privilege roles** for Snowpark sessions.
+- Store credentials in **secret managers** (e.g., AWS Secrets Manager, HashiCorp Vault).
+
+#### **Logging**
+- Log progress and errors using Python’s `logging` module:
+  ```python
+  import logging
+  logging.basicConfig(level=logging.INFO)
+  logging.info("Pipeline started")
+  ```
+
+---
+
+### **4. Real-World Integration**
+#### **Automation Options**
+- **Snowflake Task** (scheduled execution):
+  ```sql
+  CREATE TASK UPDATE_SALARY_ANALYSIS
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE = 'USING CRON 0 8 * * * UTC'
+  AS
+    CALL SYSTEM$EXECUTE_PYTHON_SCRIPT('salary_analysis_script.py');
+  ```
+
+- **Airflow DAG** (external orchestration):
+  ```python
+  from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
+
+  def run_snowpark_pipeline():
+      hook = SnowflakeHook(snowflake_conn_id="snowflake_default")
+      hook.run("CALL UPDATE_SALARY_ANALYSIS()")
+
+  PythonOperator(task_id="run_pipeline", python_callable=run_snowpark_pipeline, dag=dag)
+  ```
+
+---
+
+### **5. Summary**
+| Task               | Key Steps                                                                 |
+|--------------------|---------------------------------------------------------------------------|
+| **Data Transformation** | Use `group_by`, `agg`, and `join` to calculate and enrich results.     |
+| **UDF Creation**        | Define a Python function and register it with `udf(...)`.               |
+| **Best Practices**      | Use clustering, caching, error handling, and logging for robustness.    |
+
+By combining **Snowpark’s DataFrame API** with **custom UDFs**, you can build scalable, maintainable pipelines for data transformation and analysis directly within Snowflake. Always leverage Snowflake’s native features like clustering and materialized views for optimal performance.
+
+---
+
+
+### **Interview Question 1: What’s the difference between Snowpark and traditional Snowflake SQL?**
+
+#### **Key Differences**:
+| **Aspect**               | **Snowpark**                                                                 | **Traditional Snowflake SQL**                                                                 |
+|--------------------------|------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| **Language & Syntax**    | Uses **Python/Java/Scala** with DataFrame APIs (similar to Pandas/Spark).    | Uses **SQL** (declarative, set-based operations).                                             |
+| **Execution Model**      | **Lazily evaluated** DataFrames; operations are translated to SQL and executed in Snowflake. | Immediate execution of SQL queries (unless wrapped in stored procedures).                     |
+| **Use Cases**            | Complex data engineering, ML pipelines, integration with Python libraries (e.g., NumPy). | Ad-hoc analysis, reporting, simple ETL.                                                       |
+| **Integration**          | Supports **UDFs**, stored procedures, and integration with Pandas/ML workflows. | Pure SQL for querying, transformations, and DDL/DML.                                          |
+| **Abstraction Level**    | Higher-level abstraction with DataFrame APIs (e.g., `filter`, `group_by`).   | Lower-level control with direct SQL syntax (e.g., `SELECT`, `JOIN`, `GROUP BY`).              |
+| **Data Handling**        | Optimized for **large-scale data** without moving it out of Snowflake.       | Data remains in Snowflake, but complex logic may require external tools (e.g., Python scripts). |
+
+#### **Example**:
+- **Snowpark**:
+  ```python
+  df = session.table("SALES")
+  df_filtered = df.filter(col("AMOUNT") > 1000)
+  df_avg = df_filtered.group_by("REGION").agg(avg("AMOUNT"))
+  ```
+- **Traditional SQL**:
+  ```sql
+  SELECT REGION, AVG(AMOUNT) AS AVG_AMOUNT
+  FROM SALES
+  WHERE AMOUNT > 1000
+  GROUP BY REGION;
+  ```
+
+---
+
+### **Interview Question 2: How do you handle large-scale data transformations in Snowpark?**
+
+#### **Strategies for Scalability**:
+1. **Push Down Transformations**:
+   - Let Snowflake handle filtering, aggregation, and joins (avoid `.to_pandas()` for large data).
+   - Example:
+     ```python
+     df_cleaned = df.filter(col("STATUS") == "ACTIVE").select("ID", "AMOUNT")
+     ```
+
+2. **Clustering Keys**:
+   - Define clustering keys on high-cardinality columns (e.g., `REGION`, `DATE`) to improve query performance.
+   - Example:
+     ```sql
+     ALTER TABLE SALES CLUSTER BY (REGION, SALE_DATE);
+     ```
+
+3. **Caching Intermediate Results**:
+   - Cache frequently used DataFrames to avoid recomputation.
+   - Example:
+     ```python
+     df_cached = df_cleaned.cache_result()
+     ```
+
+4. **Partitioning & Pruning**:
+   - Partition data by date or region and use filters to prune irrelevant partitions.
+
+5. **UDFs for Custom Logic**:
+   - Use UDFs for complex logic (e.g., categorizing data) to avoid moving data out of Snowflake.
+   - Example:
+     ```python
+     @udf
+     def categorize(amount: float) -> str:
+         return "HIGH" if amount > 10000 else "LOW"
+     df.withColumn("CATEGORY", categorize(col("AMOUNT")))
+     ```
+
+6. **Optimize Joins**:
+   - Use `BROADCAST` hints for small dimension tables to optimize join performance.
+   - Example:
+     ```python
+     df_joined = df.join(dim_df.hint("BROADCAST"), "ID")
+     ```
+
+7. **Stored Procedures**:
+   - Encapsulate logic in stored procedures for reusability and performance.
+   - Example:
+     ```python
+     session.sproc.register(my_pipeline, name="RUN_PIPELINE")
+     ```
+
+---
+
+### **Interview Question 3: Explain how Snowflake’s architecture supports scalability.**
+
+#### **Core Architectural Features**:
+1. **Separation of Compute & Storage**:
+   - **Storage**: Built on cloud object storage (AWS S3, Azure Blob, GCP Cloud Storage), scales infinitely.
+   - **Compute**: Virtual Warehouses (clusters of compute resources) can be scaled up/down independently.
+
+2. **Multi-Cluster Warehouses**:
+   - Support high concurrency by dynamically adding clusters for workloads (e.g., separate warehouses for ETL and reporting).
+   - Example:
+     ```sql
+     CREATE WAREHOUSE ELT_WH MAX_CLUSTER_COUNT = 5;
+     ```
+
+3. **Shared Data Architecture**:
+   - All warehouses access the same data (no data duplication), ensuring consistency and reducing overhead.
+
+4. **Automatic Scaling & Suspension**:
+   - Warehouses auto-suspend after inactivity to save costs and scale based on query complexity.
+
+5. **Zero-Copy Cloning**:
+   - Instantly create clones of databases/tables for testing/development without duplicating storage.
+   - Example:
+     ```sql
+     CREATE TABLE test_sales CLONE production_sales;
+     ```
+
+6. **Time Travel & Fail-Safe**:
+   - Query historical data (up to 90 days) for recovery or auditing.
+   - Example:
+     ```sql
+     SELECT * FROM sales AT (TIMESTAMP => '2023-12-31 23:59:59');
+     ```
+
+7. **Distributed Query Execution**:
+   - Queries are parallelized across nodes in a warehouse for faster processing.
+
+#### **Practical Implications**:
+- **Scale Reads/Writes**: Add more warehouses or increase cluster count to handle concurrent ETL and analytics.
+- **Cost Efficiency**: Pay only for compute used; storage scales automatically.
+- **Performance**: Clustering keys and materialized views reduce data scanned for large datasets.
+
+---
+
+### **Summary**
+| Question | Key Takeaway |
+|---------|--------------|
+| **Snowpark vs. SQL** | Snowpark enables programmatic data engineering with Python/Java, while SQL is ideal for declarative queries. |
+| **Large-Scale Transformations** | Push down logic to Snowflake, use clustering, caching, and UDFs to avoid data movement. |
+| **Scalability** | Snowflake scales via separation of compute/storage, multi-cluster warehouses, and distributed execution. |
+
+By leveraging these principles, you can build **scalable, efficient data pipelines** in Snowflake, whether using **Snowpark** for complex transformations or **SQL** for ad-hoc analysis.
+
+---
+
+Here’s a structured guide to **design patterns** in data engineering, focusing on **modular code** and **DRY (Don’t Repeat Yourself)** principles, with examples in Python, Snowpark, SQL, and best practices for scalable pipelines.
+
+---
+
+### **1. Modular Code**
+#### **What Is It?**
+Breaking down code into **reusable, testable components** (functions, classes, modules) to simplify maintenance and promote reuse.
+
+#### **Snowpark/Python Example**:
+```python
+# utils.py - Reusable utility functions
+from snowflake.snowpark import Session
+
+def create_session():
+    connection_params = {
+        "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+        "user": os.getenv("SNOWFLAKE_USER"),
+        "password": os.getenv("SNOWFLAKE_PASSWORD"),
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE")
+    }
+    return Session.builder.configs(connection_params).create()
+
+def load_table(session: Session, table_name: str):
+    return session.table(table_name)
+
+# pipeline.py - Modular ETL steps
+from utils import create_session, load_table
+
+def transform_data(session: Session):
+    raw_df = load_table(session, "RAW_DATA")
+    cleaned_df = raw_df.filter(col("AMOUNT") > 0)
+    return cleaned_df
+
+def save_data(df, table_name: str):
+    df.write.mode("overwrite").save_as_table(table_name)
+
+def run_pipeline():
+    session = create_session()
+    try:
+        cleaned = transform_data(session)
+        save_data(cleaned, "CLEANED_DATA")
+    finally:
+        session.close()
+```
+
+#### **SQL Example**:
+```sql
+-- Reusable Views
+CREATE OR REPLACE VIEW active_users AS
+SELECT * FROM users WHERE status = 'active';
+
+-- Stored Procedure for Aggregation
+CREATE OR REPLACE PROCEDURE aggregate_sales()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+  CREATE OR REPLACE TABLE sales_summary AS
+  SELECT region, SUM(amount) AS total
+  FROM sales
+  GROUP BY region;
+END;
+$$;
+```
+
+---
+
+### **2. DRY Principles**
+#### **What Is It?**
+Avoid duplicating logic by **abstracting common patterns** into reusable components.
+
+#### **Examples of DRY in Practice**:
+##### **A. Parameterized Queries**
+Avoid hardcoding values:
+```python
+# Snowpark Example
+def filter_by_region(session: Session, region: str):
+    return session.table("SALES").filter(col("REGION") == region)
+
+na_sales = filter_by_region(session, "NA")
+eu_sales = filter_by_region(session, "EU")
+```
+
+```sql
+-- SQL Example
+CREATE OR REPLACE PROCEDURE filter_sales(region STRING)
+RETURNS TABLE (...)
+LANGUAGE SQL
+AS
+$$
+  SELECT * FROM sales WHERE region = :region;
+$$;
+```
+
+##### **B. Configuration Files**
+Store reusable parameters (e.g., warehouse sizes, file paths):
+```yaml
+# config.yaml
+snowflake:
+  warehouse:
+    etl_wh: xsmall
+    reporting_wh: medium
+```
+
+```python
+import yaml
+
+with open("config.yaml") as f:
+    config = yaml.safe_load(f)
+
+session.sql(f"ALTER WAREHOUSE {config['snowflake']['warehouse']['etl_wh']} RESUME").collect()
+```
+
+##### **C. Common Transformation Logic**
+Abstract repeated logic into functions:
+```python
+# transforms.py
+from snowflake.snowpark.functions import col, when
+
+def add_category_flag(df, column: str, threshold: float):
+    return df.withColumn(
+        f"{column}_category",
+        when(col(column) > threshold, "HIGH").otherwise("LOW")
+    )
+```
+
+```python
+# pipeline.py
+from transforms import add_category_flag
+
+df = add_category_flag(cleaned_df, "AMOUNT", 1000)
+```
+
+##### **D. Template-Based SQL**
+Use templating engines (e.g., Jinja) for dynamic SQL:
+```jinja
+-- template.sql.j2
+SELECT 
+  {{ group_by_column }},
+  SUM({{ metric_column }}) AS total_{{ metric_column }}
+FROM {{ table_name }}
+GROUP BY {{ group_by_column }};
+```
+
+```python
+# Render template dynamically
+template = Template(open("template.sql.j2").read())
+query = template.render(
+    group_by_column="REGION",
+    metric_column="AMOUNT",
+    table_name="SALES"
+)
+session.sql(query).collect()
+```
+
+---
+
+### **3. Design Patterns for Data Pipelines**
+#### **A. Strategy Pattern**  
+Switch between different transformation logic:
+```python
+class DataTransformer:
+    def __init__(self, strategy):
+        self.strategy = strategy
+
+    def transform(self, df):
+        return self.strategy.transform(df)
+
+class FilterStrategy:
+    def transform(self, df):
+        return df.filter(col("AMOUNT") > 0)
+
+class EnrichStrategy:
+    def transform(self, df):
+        return df.withColumn("TAX", col("AMOUNT") * 0.1)
+```
+
+#### **B. Pipeline Pattern**  
+Chain transformations declaratively:
+```python
+class Pipeline:
+    def __init__(self, steps):
+        self.steps = steps
+
+    def run(self, df):
+        for step in self.steps:
+            df = step(df)
+        return df
+
+pipeline = Pipeline([
+    lambda df: df.filter(col("AMOUNT") > 0),
+    lambda df: df.withColumn("TAX", col("AMOUNT") * 0.1)
+])
+result = pipeline.run(raw_df)
+```
+
+#### **C. Factory Pattern**  
+Abstract data source creation:
+```python
+class DataSourceFactory:
+    @staticmethod
+    def get_source(type_, session):
+        if type_ == "snowflake":
+            return SnowflakeSource(session)
+        elif type_ == "parquet":
+            return ParquetSource(session)
+
+class SnowflakeSource:
+    def read(self, table):
+        return session.table(table)
+
+class ParquetSource:
+    def read(self, path):
+        return session.read.parquet(path)
+```
+
+---
+
+### **4. Best Practices**
+| Area               | Practice                                                                 |
+|--------------------|--------------------------------------------------------------------------|
+| **Code Reuse**     | Extract common logic into functions, classes, or stored procedures.      |
+| **Configuration**  | Use YAML/JSON for environment-specific settings (dev/stage/prod).        |
+| **Error Handling** | Centralize logging and exception handling in base modules.               |
+| **Testing**        | Write unit tests for individual components (e.g., `pytest` for Python).  |
+| **Documentation**  | Document reusable modules with examples and usage guidelines.            |
+
+---
+
+### **5. Real-World Integration**
+#### **Orchestration with Airflow**:
+```python
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+
+def run_etl():
+    from pipeline import run_pipeline
+    run_pipeline()
+
+dag = DAG("daily_etl", schedule_interval="@daily", start_date=datetime(2023, 1, 1))
+PythonOperator(task_id="run_pipeline", python_callable=run_etl, dag=dag)
+```
+
+#### **Snowflake Tasks**:
+```sql
+-- Schedule via Snowflake Task
+CREATE TASK daily_transform
+  WAREHOUSE = etl_wh
+  SCHEDULE = 'USING CRON 0 8 * * * UTC'
+AS
+  CALL SYSTEM$EXECUTE_PYTHON_SCRIPT('pipeline_script.py');
+```
+
+---
+
+### **6. Summary Table**
+| Pattern           | Use Case                                | Example Tools/Techniques                |
+|-------------------|-----------------------------------------|------------------------------------------|
+| **Modular Code**  | Break pipelines into reusable components  | Functions, classes, stored procedures    |
+| **DRY Principles**| Avoid duplication with abstraction        | Templates, config files, UDFs            |
+| **Strategy**      | Switch between transformation logic       | Strategy pattern in Python               |
+| **Pipeline**      | Chain transformations declaratively       | Function chaining, DAGs in Airflow       |
+| **Factory**       | Abstract data source creation             | Factory pattern for Snowflake/Parquet    |
+
+By applying these patterns, you’ll build **scalable, maintainable data pipelines** that reduce redundancy, improve readability, and simplify debugging—whether using **Snowpark**, **SQL**, or hybrid workflows. Always combine with Snowflake’s native features like **clustering**, **materialized views**, and **result caching** for optimal performance.
+
+---
+
+Here’s a structured guide to **Git version control** for data engineering workflows, focusing on essential commands like **commit**, **branch**, **merge**, and best practices for collaboration and code management.
+
+---
+
+### **1. Basic Git Workflow for Data Engineering**
+#### **Initialize & Stage Changes**
+```bash
+# Initialize a new Git repository
+git init
+
+# Clone an existing repository
+git clone https://github.com/your-repo.git
+
+# Check status of tracked/untracked files
+git status
+
+# Add specific files to the staging area
+git add pipeline.py utils.py
+
+# Add all changes to staging
+git add .
+```
+
+#### **Commit Changes**
+```bash
+# Commit staged changes with a descriptive message
+git commit -m "Refactor Snowpark ETL script for performance"
+
+# Stage and commit in one step (for tracked files only)
+git commit -am "Fix bug in data transformation logic"
+```
+
+#### **View History**
+```bash
+# View commit history
+git log
+
+# View changes in the last commit
+git log -p
+
+# Show a compact one-line history
+git log --oneline
+```
+
+---
+
+### **2. Branching & Merging**
+#### **Create & Switch Branches**
+```bash
+# Create a new branch (e.g., for a feature or fix)
+git branch feature/snowpark-optimization
+
+# Switch to a branch
+git checkout feature/snowpark-optimization
+
+# Create and switch in one command
+git checkout -b feature/snowpark-optimization
+```
+
+#### **Merge Branches**
+```bash
+# Merge a branch into the current branch
+git checkout main
+git merge feature/snowpark-optimization
+
+# Resolve merge conflicts if any (see below)
+```
+
+#### **Delete Branches**
+```bash
+# Delete a merged branch
+git branch -d feature/snowpark-optimization
+
+# Force delete an unmerged branch
+git branch -D feature/snowpark-optimization
+```
+
+---
+
+### **3. Handling Merge Conflicts**
+When two branches modify the same file:
+```bash
+# Example conflict markers in a file:
+<<<<<<< HEAD
+    # Code from main branch
+=======
+    # Code from feature branch
+>>>>>>> feature/snowpark-optimization
+```
+
+#### **Steps to Resolve**:
+1. Open conflicting files and manually edit to keep desired changes.
+2. Mark conflicts as resolved:
+   ```bash
+   git add conflicted_file.py
+   ```
+3. Complete the merge:
+   ```bash
+   git commit
+   ```
+
+---
+
+### **4. Remote Repositories (GitHub/GitLab)**
+#### **Link & Push to Remote**
+```bash
+# Add a remote repository
+git remote add origin https://github.com/your-username/your-repo.git
+
+# Push local branch to remote
+git push origin feature/snowpark-optimization
+
+# Push all branches
+git push --all origin
+```
+
+#### **Pull Changes from Remote**
+```bash
+# Fetch and merge changes from remote branch
+git pull origin main
+
+# Fetch without merging
+git fetch origin
+```
+
+#### **Sync Forked Repositories**
+```bash
+# Add upstream remote (for forked repos)
+git remote add upstream https://github.com/original-owner/original-repo.git
+
+# Fetch upstream changes
+git fetch upstream
+
+# Merge upstream changes into main
+git checkout main
+git merge upstream/main
+```
+
+---
+
+### **5. Advanced Git Commands**
+#### **Amend Last Commit**
+```bash
+# Fix a mistake in the last commit
+git commit --amend -m "Updated commit message"
+```
+
+#### **Stash Changes**
+```bash
+# Temporarily save uncommitted changes
+git stash
+
+# Apply stashed changes
+git stash apply
+```
+
+#### **Rebase vs. Merge**
+```bash
+# Rebase current branch onto another (linear history)
+git checkout feature/snowpark-optimization
+git rebase main
+
+# Resolve conflicts during rebase
+git rebase --continue
+```
+
+#### **Tagging Releases**
+```bash
+# Create a tag for a release
+git tag v1.0.0
+
+# Push tags to remote
+git push origin v1.0.0
+```
+
+---
+
+### **6. Best Practices for Data Engineering**
+| Practice              | Description                                                                 |
+|-----------------------|-----------------------------------------------------------------------------|
+| **Atomic Commits**    | Commit small, logical changes (e.g., "Fix Snowpark UDF for salary ranges"). |
+| **Descriptive Messages** | Use clear, concise messages (e.g., "Optimize ETL pipeline for Snowflake"). |
+| **Branch per Feature** | Isolate work in branches (e.g., `feature/data-transformation`).            |
+| **Code Reviews**      | Use pull requests for peer review before merging to main.                   |
+| **.gitignore**        | Exclude large files (e.g., datasets, logs, virtual environments):          |
+  ```bash
+  # .gitignore
+  *.csv
+  *.parquet
+  __pycache__
+  .env
+  ```
+| **CI/CD Integration** | Automate testing (e.g., unit tests for Snowpark scripts).                  |
+
+---
+
+### **7. Real-World Example: Data Engineering Workflow**
+#### **Scenario**:  
+You’re working on optimizing a Snowpark ETL script (`etl_script.py`) and need to collaborate with a teammate.
+
+#### **Steps**:
+1. **Create a Feature Branch**:
+   ```bash
+   git checkout -b feature/optimize-snowpark
+   ```
+
+2. **Make Changes**:
+   - Modify `etl_script.py` to add clustering keys.
+   - Test locally.
+
+3. **Commit & Push**:
+   ```bash
+   git add etl_script.py
+   git commit -m "Add clustering keys for Snowpark ETL"
+   git push origin feature/optimize-snowpark
+   ```
+
+4. **Open Pull Request**:
+   - Submit a PR on GitHub/GitLab for review.
+
+5. **Resolve Conflicts**:
+   - If conflicts arise with `main`, merge and resolve:
+     ```bash
+     git checkout feature/optimize-snowpark
+     git merge main
+     # Resolve conflicts and complete merge
+     ```
+
+6. **Merge to Main**:
+   - After approval, merge the PR and delete the feature branch.
+
+---
+
+### **8. Key Takeaways**
+- **Version control** is essential for tracking changes in code, especially for collaborative data engineering projects.
+- Use **branches** to isolate work and **merge** only after testing.
+- Follow **best practices** like atomic commits and `.gitignore` to keep repositories clean.
+- Integrate with **remote repositories** (e.g., GitHub) for collaboration and **CI/CD** pipelines.
+
+By mastering these Git commands and workflows, you’ll streamline collaboration, reduce errors, and maintain a clean history of changes in your data engineering projects.
+
+---
+
+Here’s a structured guide to **testing Python code** (using `unittest` and `pytest`) and **Agile methodology** (sprints, stand-ups, backlog grooming), tailored for **data engineering** workflows with practical examples and best practices.
+
+---
+
+### **1. Testing Python Code (unittest vs. pytest)**
+
+#### **Why Testing Matters in Data Engineering**
+- Ensures data pipelines, transformations, and integrations work as expected.
+- Prevents regressions when modifying code (e.g., Snowpark scripts, ETL logic).
+- Validates data quality (e.g., null checks, schema validation).
+
+---
+
+#### **A. `unittest`: Built-in Python Testing Framework**
+**Example Test Case**:
+```python
+# test_data_transformations.py
+import unittest
+from transformations import clean_data, calculate_total_sales
+
+class TestDataTransformations(unittest.TestCase):
+    def setUp(self):
+        """Set up test data before each test."""
+        self.raw_data = [
+            {"id": 1, "amount": 100, "status": "completed"},
+            {"id": 2, "amount": None, "status": "pending"},
+        ]
+
+    def test_clean_data_removes_nulls(self):
+        cleaned = clean_data(self.raw_data)
+        self.assertEqual(len(cleaned), 1)  # Only 1 valid row
+
+    def test_calculate_total_sales(self):
+        total = calculate_total_sales(self.raw_data)
+        self.assertEqual(total, 100)  # Only 1 valid amount
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+**Run Tests**:
+```bash
+python -m unittest test_data_transformations.py -v
+```
+
+**Key Features**:
+- `setUp()` and `tearDown()` for setup/cleanup.
+- Built-in assertions (`assertEqual`, `assertTrue`, `assertRaises`).
+- Organized test classes and methods.
+
+---
+
+#### **B. `pytest`: Lightweight Third-Party Framework**
+**Example Test Case**:
+```python
+# test_data_transformations.py
+import pytest
+from transformations import add_tax, validate_schema
+
+def test_add_tax():
+    assert add_tax(100) == 110  # 10% tax
+    assert add_tax(0) == 0
+
+def test_validate_schema_passes():
+    data = {"id": 1, "name": "Product A"}
+    assert validate_schema(data) is True
+
+def test_validate_schema_fails():
+    data = {"id": "invalid", "name": 123}
+    with pytest.raises(ValueError):
+        validate_schema(data)
+```
+
+**Run Tests**:
+```bash
+pytest test_data_transformations.py -v
+```
+
+**Advantages**:
+- Simple syntax (no need for `self.assert...`).
+- Rich ecosystem (plugins for coverage, parameterized tests, etc.).
+- Supports fixtures for reusable setup.
+
+**Fixtures Example**:
+```python
+# conftest.py (shared fixtures)
+import pytest
+
+@pytest.fixture
+def sample_data():
+    return [
+        {"id": 1, "amount": 100},
+        {"id": 2, "amount": None},
+    ]
+```
+
+```python
+# test_transformations.py
+def test_clean_data(sample_data):
+    cleaned = clean_data(sample_data)
+    assert len(cleaned) == 1
+```
+
+---
+
+#### **C. Best Practices for Testing Data Pipelines**
+| Practice | Description |
+|--------|-------------|
+| **Test Coverage** | Use `coverage.py` to measure coverage: `coverage run -m pytest && coverage report`. |
+| **Mock External Dependencies** | Use `unittest.mock` to simulate Snowflake queries or API calls. |
+| **Parameterized Tests** | Test edge cases (e.g., empty datasets, invalid formats). |
+| **Integration Tests** | Test full pipelines (e.g., end-to-end Snowpark workflows). |
+| **CI/CD Integration** | Automate tests in pipelines (e.g., GitHub Actions, Airflow). |
+
+---
+
+### **2. Agile Methodology for Data Engineering**
+
+#### **Why Agile Works for Data Projects**
+- **Iterative Development**: Break large tasks (e.g., building a data lake) into smaller, deliverable chunks.
+- **Collaboration**: Cross-functional teamwork between data engineers, analysts, and product owners.
+- **Flexibility**: Adapt to changing requirements (e.g., new data sources, schema updates).
+
+---
+
+#### **A. Key Agile Concepts**
+| Concept | Description | Example in Data Engineering |
+|-------|-------------|-----------------------------|
+| **Sprints** | Time-boxed work periods (1–4 weeks). | Build a Snowpark ETL pipeline in 2 weeks. |
+| **Backlog** | Prioritized list of tasks. | Tasks: "Ingest CSV data," "Optimize query performance." |
+| **Stand-ups** | Daily 15-min meetings to sync progress. | Discuss blockers like slow data ingestion. |
+| **Sprint Planning** | Team selects tasks for the sprint. | Prioritize "Build data warehouse schema" over "Add documentation." |
+| **Retrospective** | Review what went well and what to improve. | "We spent too much time debugging; add unit tests next sprint." |
+| **User Stories** | Define requirements from the user’s perspective. | "As an analyst, I want cleaned sales data to generate reports." |
+
+---
+
+#### **B. Agile Ceremonies in Practice**
+1. **Daily Stand-up**:
+   - Each member answers:
+     - What did I do yesterday?
+     - What will I do today?
+     - Are there any blockers?
+
+2. **Sprint Planning**:
+   - Product Owner prioritizes the backlog.
+   - Team estimates effort (e.g., story points) and commits to tasks.
+
+3. **Backlog Grooming**:
+   - Refine and prioritize tasks.
+   - Split large tasks (e.g., "Migrate all ETL to Snowpark" → "Migrate sales ETL," "Migrate inventory ETL").
+
+4. **Sprint Review/Demo**:
+   - Show completed work (e.g., a new data pipeline or dashboard).
+
+5. **Retrospective**:
+   - Reflect on processes and identify improvements.
+
+---
+
+#### **C. Tools for Agile in Data Engineering**
+| Tool | Use Case |
+|------|----------|
+| **Jira** | Track user stories, bugs, and tasks. |
+| **Trello** | Visualize backlog and sprint progress (Kanban board). |
+| **Confluence** | Document technical designs and sprint plans. |
+| **Slack/Microsoft Teams** | Daily communication and stand-ups. |
+| **Azure DevOps** | Integrate Agile with CI/CD pipelines. |
+
+---
+
+#### **D. Best Practices for Agile Data Teams**
+| Practice | Description |
+|--------|-------------|
+| **Small, Incremental Deliverables** | Focus on delivering value early (e.g., one pipeline per sprint). |
+| **Collaborative Backlog Grooming** | Involve engineers, analysts, and stakeholders. |
+| **Automate Testing in Sprints** | Include unit/integration tests in sprint goals. |
+| **Cross-Functional Teams** | Pair data engineers with analysts to align priorities. |
+| **Continuous Feedback** | Demo progress to stakeholders every sprint. |
+
+---
+
+### **3. Summary Table**
+| Topic | Key Takeaways |
+|-------|---------------|
+| **Testing** | Use `unittest` or `pytest` to validate data transformations; automate tests in CI/CD. |
+| **Agile** | Use sprints for iterative development, daily stand-ups for communication, and backlog grooming for prioritization. |
+| **Data Engineering Fit** | Combine testing with Agile to build robust pipelines iteratively (e.g., test-driven development + sprint planning). |
+
+By applying **unit testing** and **Agile principles**, you’ll ensure your data pipelines are reliable, maintainable, and aligned with business needs. Always adapt Agile practices to fit the unique challenges of data projects (e.g., handling evolving schemas or large-scale data).
+
+---
+
+### **1. Unit Test for a Python Function**  
+**Objective**: Write a unit test for a Python function that calculates total sales after tax using `pytest`.  
+
+#### **Code Example**  
+```python
+# transformations.py
+def calculate_total_sales(items, tax_rate=0.1):
+    """
+    Calculate total sales after tax.
+    
+    Args:
+        items: List of item prices (floats).
+        tax_rate: Tax percentage (default 10%).
+
+    Returns:
+        Total sales amount after tax.
+    """
+    if not isinstance(items, list) or any(not isinstance(i, (int, float)) for i in items):
+        raise ValueError("Items must be a list of numbers.")
+    subtotal = sum(items)
+    return subtotal * (1 + tax_rate)
+```
+
+```python
+# test_transformations.py
+import pytest
+from transformations import calculate_total_sales
+
+def test_calculate_total_sales():
+    # Test valid input
+    assert calculate_total_sales([100, 200, 300], 0.1) == 660.0  # 600 + 10% tax
+    
+    # Test empty list
+    assert calculate_total_sales([], 0.1) == 0.0
+
+    # Test invalid input
+    with pytest.raises(ValueError):
+        calculate_total_sales("not a list", 0.1)
+
+    with pytest.raises(ValueError):
+        calculate_total_sales([100, "invalid"], 0.1)
+```
+
+**Run Tests**:  
+```bash
+pytest test_transformations.py -v
+```
+
+---
+
+### **2. Git Workflow for a Team Project**  
+**Agile-Inspired Git Workflow** for collaborative data engineering projects.  
+
+#### **Steps**:  
+1. **Main Branches**:  
+   - `main`: Production-ready code.  
+   - `develop`: Latest development changes.  
+
+2. **Feature Branches**:  
+   - Create a branch for each feature/fix:  
+     ```bash
+     git checkout -b feature/clean-data develop
+     ```
+
+3. **Development**:  
+   - Commit small, logical changes:  
+     ```bash
+     git add clean_data.py
+     git commit -m "Add null handling in data cleaning function"
+     ```
+
+4. **Push to Remote**:  
+   ```bash
+   git push origin feature/clean-data
+   ```
+
+5. **Pull Request (PR)**:  
+   - Open a PR on GitHub/GitLab for code review.  
+   - Link to Agile user story (e.g., "As an analyst, I need cleaned data...").  
+
+6. **Code Review & Merge**:  
+   - Team reviews PR, suggests changes.  
+   - Merge into `develop` after approval:  
+     ```bash
+     git checkout develop
+     git merge --no-ff feature/clean-data
+     ```
+
+7. **Sprint Release**:  
+   - Merge `develop` into `main` at the end of a sprint:  
+     ```bash
+     git checkout main
+     git merge --no-ff develop
+     git tag v1.0.0  # Tag release version
+     ```
+
+#### **Best Practices**:  
+- **Atomic Commits**: Commit related changes together.  
+- **.gitignore**: Exclude datasets, logs, and virtual environments.  
+- **CI/CD Integration**: Automate testing on PRs (e.g., GitHub Actions).  
+
+---
+
+### **3. Design a Simple REST API for a Data Endpoint Using Flask**  
+**Objective**: Build a Flask API for retrieving and adding sales data.  
+
+#### **Code Example**  
+```python
+# app.py
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# In-memory sales data
+sales_data = [
+    {"id": 1, "region": "NA", "amount": 1000},
+    {"id": 2, "region": "EU", "amount": 1500},
+]
+
+@app.route("/sales", methods=["GET"])
+def get_sales():
+    region = request.args.get("region")
+    if region:
+        filtered = [s for s in sales_data if s["region"].lower() == region.lower()]
+        return jsonify(filtered)
+    return jsonify(sales_data)
+
+@app.route("/sales", methods=["POST"])
+def add_sale():
+    new_sale = request.get_json()
+    required_fields = ["id", "region", "amount"]
+    if not all(f in new_sale for f in required_fields):
+        return jsonify({"error": "Missing required fields"}), 400
+    sales_data.append(new_sale)
+    return jsonify({"message": "Sale added"}), 201
+
+if __name__ == "__main__":
+    app.run(debug=True)
+```
+
+#### **Test the API**  
+- **Get Sales**:  
+  ```bash
+  curl http://localhost:5000/sales?region=NA
+  ```
+
+- **Add Sale**:  
+  ```bash
+  curl -X POST http://localhost:5000/sales \
+       -H "Content-Type: application/json" \
+       -d '{"id": 3, "region": "APAC", "amount": 2000}'
+  ```
+
+#### **Best Practices**:  
+- **Validation**: Check input data (e.g., required fields).  
+- **Error Handling**: Return appropriate HTTP status codes.  
+- **Documentation**: Use Swagger/OpenAPI for API docs.  
+- **Security**: Add authentication (e.g., Flask-JWT).  
+
+---
+
+### **Summary**  
+| Task | Key Takeaways |  
+|------|---------------|  
+| **Unit Testing** | Use `pytest` for simple, parameterized tests; validate inputs and edge cases. |  
+| **Git Workflow** | Follow feature branching, PR reviews, and sprint-based releases for collaboration. |  
+| **Flask API** | Design RESTful endpoints with clear routes, validation, and error handling. |  
+
+By applying these practices, you’ll ensure **reliable code**, **collaborative efficiency**, and **scalable data APIs** in data engineering workflows.
+
+---
+
