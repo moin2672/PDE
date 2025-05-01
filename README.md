@@ -199,8 +199,22 @@ import pandas as pd
 def a_plus_b(a: int, b: int) -> int:
     return a+b
 # required stage location for this.
-```
 
+from snowflake.snowpark.functions import udf
+from snowflake.snowpark.types import IntegerType
+import pandas as pd
+
+@udf(return_type=IntegerType(), input_types=[IntegerType(), IntegerType()], vectorized=True)
+def vector_add(series1: pd.Series, series2: pd.Series) -> pd.Series:
+    """Adds two Pandas Series element-wise."""
+    return series1 + series2
+
+# Assuming you have a DataFrame 'df' with columns 'col1' and 'col2'
+df = session.create_dataframe([[1, 2], [3, 4], [5, 6]], columns=["col1", "col2"])
+
+df = df.with_column("sum_vectorized", vector_add(df["col1"], df["col2"]))
+df.show()
+```
 ```sql
 SELECT C_CURRENT_HDEMO_SK, A_PLUS_B(C_CURRENT_HDEMO_SK,3) FROM DEMO_DB.PUBLIC.CUSTOMER_TEST LIMIT 10; --if limit is 10, then the python code will be executed 10 times.
 
@@ -225,6 +239,142 @@ WHERE C_CURRENT_HDEMO_SK IS NOT NULL LIMIT 1000;
 - A_PLUS_B_SQL is executed in the snowflake engine and A_PLUS_B is executed in the python engine.
 - A_PLUS_B_SQL is faster than A_PLUS_B because it is executed in the snowflake engine and A_PLUS_B is executed in the python engine.
 - A_PLUS_B_SQL took 86ms and A_PLUS_B took 962ms for 1000 records.
+
+```python
+from snowflake.snowpark.types import IntegerType, StringType
+from snowflake.snowpark.functions import udf, col
+import pandas as pd
+
+session_new = session # Assuming you have an active Snowpark session
+
+@udf(session=session_new, name='a_plus_b_scalar', input_types=[IntegerType(), IntegerType()], return_type=IntegerType(), stage_location='@udf_stage', is_permanent=True, replace=True)
+def a_plus_b_scalar(a: int, b: int) -> int:
+    return a + b
+
+# Now in SQL, you can call the scalar UDF
+query = """
+SELECT C_CURRENT_HDEMO_SK, A_PLUS_B_SCALAR(C_CURRENT_HDEMO_SK, 3)
+FROM DEMO_DB.PUBLIC.CUSTOMER_TEST
+LIMIT 10;
+"""
+session.sql(query).show()
+
+from snowflake.snowpark.types import IntegerType, StringType
+from snowflake.snowpark.functions import udf, col
+import pandas as pd
+
+session_new = session # Assuming you have an active Snowpark session
+
+@udf(session=session_new, name='a_plus_b_vectorized', input_types=[IntegerType(), IntegerType()], return_type=IntegerType(), stage_location='@udf_stage', is_permanent=True, replace=True, vectorized=True)
+def a_plus_b_vectorized(series_a: pd.Series, series_b: pd.Series) -> pd.Series:
+    return series_a + series_b
+
+customer_test_df = session.table("DEMO_DB.PUBLIC.CUSTOMER_TEST")
+result_df = customer_test_df.select(
+    col("C_CURRENT_HDEMO_SK"),
+    a_plus_b_vectorized(col("C_CURRENT_HDEMO_SK"), col(lit(3)))
+)
+result_df.limit(10).show()
+
+from snowflake.snowpark.functions import udf, col, lit
+from snowflake.snowpark.types import IntegerType
+import pandas as pd
+
+@udf(name='vector_add_func', input_types=[IntegerType(), IntegerType()], return_type=IntegerType(), vectorized=True)
+def vector_add(series1: pd.Series, series2: pd.Series) -> pd.Series:
+    return series1 + series2
+
+# Assuming you have a Snowpark session 'session' and a table 'my_table'
+df = session.table("my_table")
+
+# "Querying" and applying the vectorized UDF using the DataFrame API
+result_df = df.select(
+    col("column_a"),
+    col("column_b"),
+    vector_add("column_a", "column_b").alias("sum_vectorized")
+)
+
+result_df.show()
+
+# You can further filter, order, etc., using DataFrame operations
+filtered_df = result_df.filter(col("sum_vectorized") > 10)
+filtered_df.show()
+
+# If you need to execute a SQL query that *uses* the result of the vectorized UDF,
+# you might create a temporary view or table from the DataFrame:
+result_df.create_temp_view("vectorized_results")
+sql_query = "SELECT * FROM vectorized_results WHERE sum_vectorized < 20"
+session.sql(sql_query).show()
+```
+ - Regular scalar UDFs can be called directly in standard SQL queries.
+ - Vectorized UDFs (defined with vectorized=True) are designed to be used within the Snowpark DataFrame API, where the batching and execution are managed by the Snowpark runtime for optimized performance. You cannot directly call them in the same way in a pure SQL query.
+
+#### **User-Defined Table Functions - UDTF**
+```python
+schema = StructType([
+     StructField("symbol", StringType()),
+     StructField("cost", StringType())
+ ])
+
+@udtf(name="process_stock_price", is_permanent=True, stage_location="@demo_stage", replace=True, packages=["snowflake-snowpark-python","pandas"],session=session_new,input_types=[StringType(),IntegerType(),IntegerType()],output_schema=schema)
+class StockSale:
+    def process(self, symbol, quantity, price):
+         cost = quantity * price
+         yield (symbol, cost)
+
+```
+- yield is a way for a function to be a "generator" – to produce a series of results in a more controlled and memory-friendly way, especially when you might have many results to produce.
+
+```python
+import json
+from snowflake.snowpark.files import SnowflakeFile
+from snowflake.snowpark.functions import sproc,udtf,col
+import pandas as pd
+import snowflake.snowpark as snowpark
+from snowflake.snowpark.types  import PandasDataFrameType,MapType,PandasSeriesType,StringType,StructType,StructField,IntegerType,BooleanType
+
+schema = StructType([
+     StructField("soloistRoles", StringType()),
+     StructField("soloistInstrument", StringType()),
+     StructField("id", StringType()),
+     StructField("soloist_FirstName", StringType()),
+     StructField("soloist_LastName", StringType()),
+ ])
+
+@udtf(name="parse_json_sp_local_udtf", is_permanent=True, stage_location="@demo_stage", replace=True, packages=["snowflake-snowpark-python","pandas"],session=session_new,input_types=[StringType()],output_schema=schema)
+class StockSale:
+    def process(self,file_path):
+        with SnowflakeFile.open(file_path) as f:
+            # Read json file and normalize data.
+            nycphil = json.load(f)
+            works_data = pd.json_normalize(data=nycphil['programs'], record_path='works', meta=['id', 'orchestra','programID','season'])
+            # Drop columns which is not required.
+            works_data = works_data.drop(['soloists','movement.em','movement._','workTitle._','workTitle.em'], axis=1)
+
+            
+            # Split conductor name as first-name and last-name
+            works_data[['composer_FirstName', 'composer_LastName']] = works_data['composerName'].loc[works_data['composerName'].str.split().str.len() == 2].str.split(expand=True)
+            works_data = works_data.drop(['composerName'], axis=1)
+            
+            # Create another data frame with name  soloist_df               
+            soloist_df = pd.json_normalize(data=nycphil['programs'], record_path=['works', 'soloists'], 
+                                    meta=['id'])
+                                    
+            soloist_df[['soloist_FirstName', 'soloist_LastName']] = soloist_df['soloistName'].loc[soloist_df['soloistName'].str.split().str.len() == 2].str.split(expand=True)
+            soloist_df = soloist_df.drop(['soloistName'], axis=1)
+        
+            #session_new.write_pandas(soloist_df, "soloist_data_udf", auto_create_table=True,overwrite=True)
+            #session_new.write_pandas(works_data, "programs_data_udf", auto_create_table=True,overwrite=True)
+
+            for _, row in soloist_df.iterrows():
+                yield  (row['soloistRoles'],row['soloistInstrument'],row['id'],row['soloist_FirstName'],
+                row['soloist_LastName'])
+
+```
+
+```sql
+SELECT * FROM TABLE(DEMO_DB.PUBLIC.PARSE_JSON_SP_LOCAL_UDTF(build_scoped_file_url('@demo_stage','raw_nyc_phil.json'))) 
+```
 
 #### **Caching & Optimization**
 - Cache intermediate results:
@@ -1204,3 +1354,955 @@ recent_purchases.show()
 ---
 
 By applying these techniques, you’ll write **faster, cleaner, and more maintainable SQL** for both transactional and analytical workloads. Always combine query optimization with proper indexing and schema design for maximum efficiency.
+
+Here’s a structured guide to **Python for Data Engineering**, covering key libraries, ETL pipelines, automation, error handling, and performance optimization with real-world examples and best practices.
+
+---
+
+### **1. Key Libraries for Data Engineering**
+#### **Pandas**
+For tabular data manipulation:
+```python
+import pandas as pd
+
+# Load and clean data
+df = pd.read_csv("data.csv")
+df.dropna(inplace=True)
+df["sales"] = df["quantity"] * df["price"]
+```
+
+#### **NumPy**
+For numerical operations and vectorization:
+```python
+import numpy as np
+
+# Efficient array operations
+arr = np.array([1, 2, 3])
+squared = arr ** 2  # Vectorized computation
+```
+
+#### **PySpark**
+For distributed processing of large datasets:
+```python
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("ETL").getOrCreate()
+df = spark.read.parquet("s3://data/transactions/")
+df.filter(df.amount > 100).write.parquet("cleaned_data/")
+```
+
+#### **SQLAlchemy**
+For database abstraction:
+```python
+from sqlalchemy import create_engine
+
+engine = create_engine("postgresql://user:password@localhost/db")
+df.to_sql("table_name", engine, if_exists="replace", index=False)
+```
+
+#### **Snowflake Connector**
+For Snowflake integration:
+```python
+import snowflake.connector
+
+conn = snowflake.connector.connect(
+    user='user',
+    password='password',
+    account='account',
+    warehouse='compute_wh'
+)
+cur = conn.cursor()
+cur.execute("SELECT * FROM sales LIMIT 100")
+results = cur.fetchall()
+```
+
+---
+
+### **2. Building ETL Pipelines**
+#### **Step 1: Extract**
+- **From Files**:
+  ```python
+  df = pd.read_json("data.json")  # JSON/CSV/Parquet
+  ```
+- **From Databases**:
+  ```python
+  engine = create_engine("mysql://user:pass@host/db")
+  df = pd.read_sql("SELECT * FROM orders", engine)
+  ```
+
+#### **Step 2: Transform**
+- **Data Cleaning**:
+  ```python
+  df["date"] = pd.to_datetime(df["date"])
+  df.drop_duplicates(subset=["order_id"], inplace=True)
+  ```
+- **Aggregation**:
+  ```python
+  summary = df.groupby("region").agg({"sales": "sum"}).reset_index()
+  ```
+
+#### **Step 3: Load**
+- **To Snowflake**:
+  ```python
+  from snowflake.connector.pandas_tools import write_pandas
+
+  write_pandas(conn, df, "TARGET_TABLE", auto_create_table=True)
+  ```
+- **To Data Lakes**:
+  ```python
+  df.to_parquet("s3://bucket/output/data.parquet")
+  ```
+
+#### **Example Pipeline**:
+```python
+def etl_pipeline():
+    # Extract
+    raw = pd.read_csv("raw_data.csv")
+    # Transform
+    cleaned = raw.dropna().assign(total=lambda x: x.qty * x.price)
+    # Load
+    cleaned.to_sql("processed_sales", engine, if_exists="append")
+
+etl_pipeline()
+```
+
+---
+
+### **3. Automation with Python Scripts**
+#### **Data Cleaning Script**:
+```python
+import os
+import pandas as pd
+
+def clean_data(file_path):
+    try:
+        df = pd.read_csv(file_path)
+        df.dropna(inplace=True)
+        df.to_csv(f"cleaned_{os.path.basename(file_path)}", index=False)
+    except Exception as e:
+        print(f"Error: {e}")
+
+clean_data("data.csv")
+```
+
+#### **Scheduling with Cron**:
+```bash
+# Run daily at 2 AM
+0 2 * * * /usr/bin/python3 /path/to/etl_script.py
+```
+
+#### **Airflow DAG**:
+```python
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from datetime import datetime
+
+def run_etl():
+    from etl_script import etl_pipeline
+    etl_pipeline()
+
+dag = DAG("daily_etl", schedule_interval="@daily", start_date=datetime(2023, 1, 1))
+
+task = PythonOperator(task_id="run_etl", python_callable=run_etl, dag=dag)
+```
+
+---
+
+### **4. Error Handling and Logging**
+#### **Try-Except Blocks**:
+```python
+try:
+    df = pd.read_csv("missing_file.csv")
+except FileNotFoundError:
+    print("Input file not found. Check path.")
+```
+
+#### **Logging**:
+```python
+import logging
+
+logging.basicConfig(filename="etl.log", level=logging.INFO)
+try:
+    logging.info("Starting ETL...")
+    # Your code
+except Exception as e:
+    logging.error(f"Error: {str(e)}")
+```
+
+#### **Retry Logic**:
+```python
+from tenacity import retry, stop_after_attempt
+
+@retry(stop=stop_after_attempt(3))
+def fetch_data():
+    # Retry up to 3 times if fails
+    response = requests.get("https://api.example.com/data")
+    response.raise_for_status()
+    return response.json()
+```
+
+---
+
+### **5. Performance Optimization**
+#### **Memory Management**
+- Use appropriate data types:
+  ```python
+  df["category"] = df["category"].astype("category")  # Reduces memory usage
+  ```
+ -  `df["category"].astype("category")` is a way to make your computer use less memory when you have columns with lots of repeated text (or other similar values) by turning those texts into secret codes! It's like being a super organized toy sorter who uses clever shortcuts to save space and time.
+
+
+#### **Vectorization**
+- Replace loops with NumPy/Pandas vectorized ops:
+  ```python
+  # Inefficient
+  df["discounted_price"] = [price * 0.9 for price in df["price"]]
+  
+  # Efficient
+  df["discounted_price"] = df["price"] * 0.9
+  ```
+
+#### **Distributed Processing with PySpark**
+- Process terabytes of data:
+  ```python
+  spark = SparkSession.builder \
+      .appName("LargeData") \
+      .config("spark.sql.shuffle.partitions", "8") \
+      .getOrCreate()
+  ```
+
+#### **Batch Processing**
+- Use chunking for large files:
+  ```python
+  for chunk in pd.read_csv("big_data.csv", chunksize=10000):
+      process(chunk)  # Process in batches
+  ```
+
+#### **Best Practices**
+- Use **Dask** for out-of-core computation:
+  ```python
+  import dask.dataframe as dd
+  df = dd.read_csv("huge_data.csv")
+  df.groupby("id").mean().compute()
+  ```
+- Cache intermediate results in Spark:
+  ```python
+  df.cache()
+  ```
+
+---
+
+### **6. Real-World Integration: Snowflake & Python**
+#### **ETL with Snowflake Connector**:
+```python
+def load_to_snowflake():
+    conn = snowflake.connector.connect(
+        user="user", password="password", account="account"
+    )
+    cur = conn.cursor()
+    try:
+        # Extract
+        cur.execute("SELECT * FROM raw_data")
+        data = cur.fetchall()
+        df = pd.DataFrame(data, columns=[desc[0] for desc in cur.description])
+        # Transform
+        df["total"] = df["qty"] * df["price"]
+        # Load
+        write_pandas(conn, df, "PROCESSED_DATA")
+    except Exception as e:
+        logging.error(f"Snowflake Error: {e}")
+    finally:
+        conn.close()
+
+load_to_snowflake()
+```
+
+---
+
+### **7. Best Practices Summary**
+| Area               | Practice                                                                 |
+|--------------------|--------------------------------------------------------------------------|
+| **Code Structure** | Modularize functions, use config files, version control (Git).          |
+| **Security**       | Use environment variables for secrets (e.g., `os.getenv("API_KEY")`).   |
+| **Testing**        | Validate data quality (e.g., `assert df.isnull().sum().sum() == 0`).     |
+| **Monitoring**     | Log metrics (e.g., row counts, runtime) for debugging pipelines.         |
+
+---
+
+By combining these tools and techniques, you can build **robust, scalable data pipelines** tailored to your infrastructure (e.g., Snowflake, AWS, or local clusters). Always profile performance-critical sections using tools like `cProfile` or Spark’s UI for optimization.
+
+---
+Here’s a **complete Python script** using **Snowpark** to build an ETL pipeline that reads a CSV, cleans nulls, applies transformations (group-by, joins), and loads to a Snowflake table. This approach leverages **Snowpark’s DataFrame API** for scalability and performance.
+
+---
+
+### **1. Prerequisites**
+#### Install Snowpark:
+```bash
+pip install snowflake-snowpark-python
+```
+
+#### Configure `connection.json`:
+```json
+{
+  "account": "<your_account>",
+  "user": "<your_user>",
+  "password": "<your_password>",
+  "role": "<your_role>",
+  "warehouse": "<your_warehouse>",
+  "database": "<your_database>",
+  "schema": "<your_schema>"
+}
+```
+
+---
+
+### **2. Full Pipeline Script**
+```python
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, when
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def create_session():
+    """Create a Snowflake session."""
+    try:
+        session = Session.builder.configs({
+            "connection_name": "my_connection",
+            "account": "<your_account>",
+            "user": "<your_user>",
+            "password": "<your_password>",
+            "role": "<your_role>",
+            "warehouse": "<your_warehouse>",
+            "database": "<your_database>",
+            "schema": "<your_schema>"
+        }).create()
+        logger.info("Connected to Snowflake")
+        return session
+    except Exception as e:
+        logger.error(f"Connection failed: {e}")
+        raise
+
+def load_csv_to_snowflake(session: Session):
+    """Read CSV from Snowflake stage, clean, transform, and load."""
+    try:
+        # Step 1: Read CSV from Snowflake stage
+        df_raw = (
+            session.read
+            .option("FIELD_DELIMITER", ",")
+            .option("SKIP_HEADER", 1)
+            .csv("@MY_STAGE/data/sales.csv")
+        )
+        df_raw = df_raw.to_df(["DATE", "REGION_ID", "SALES", "UNITS"])
+
+        # df_raw.to_df(["DATE", ...]) is a method of the Snowpark DataFrame that renames its columns. The result of this operation is still a Snowpark DataFrame with         the updated column names.
+
+        df_pandas = df_raw.to_pandas()
+        print(type(df_pandas))  # Output: <class 'pandas.core.frame.DataFrame'>
+
+        # Step 2: Clean null values
+        df_cleaned = (
+            df_raw
+            .filter(col("SALES").is_not_null() & col("UNITS").is_not_null())
+            .with_column("SALES", col("SALES").cast("float"))
+            .with_column("UNITS", col("UNITS").cast("int"))
+        )
+
+        # Step 3: Join with region dimension table
+        df_regions = session.table("REGIONS")
+        df_joined = df_cleaned.join(df_regions, df_cleaned["REGION_ID"] == df_regions["ID"], join_type="inner")
+
+        # Step 4: Group-by transformation
+        df_summary = (
+            df_joined
+            .group_by("REGION_NAME")
+            .agg(
+                {"SALES": "sum", "UNITS": "sum"}
+            )
+            .with_column_renamed('"SUM(SALES)"', "TOTAL_SALES")
+            .with_column_renamed('"SUM(UNITS)"', "TOTAL_UNITS")
+        )
+
+        # Step 5: Load to target table
+        df_summary.write.save_as_table("SALES_SUMMARY", mode="overwrite")
+        logger.info("Pipeline completed successfully")
+
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+if __name__ == "__main__":
+    session = create_session()
+    load_csv_to_snowflake(session)
+```
+
+---
+
+### **3. Key Components Explained**
+#### **A. Reading CSV from Snowflake Stage**
+- Assumes `sales.csv` is uploaded to `@MY_STAGE/data/`.
+- Uses Snowpark’s `read.csv()` with options for delimiters and headers.
+
+#### **B. Data Cleaning**
+- Filters null values using `filter()` and `is_not_null()`.
+- Casts columns to appropriate types (`float` for sales, `int` for units).
+
+#### **C. Joining with Dimension Table**
+- Joins with a `REGIONS` table to map `REGION_ID` to human-readable `REGION_NAME`.
+
+#### **D. Aggregation**
+- Groups by `REGION_NAME` and aggregates sales/units totals.
+
+#### **E. Loading to Snowflake**
+- Writes output to `SALES_SUMMARY` table using `save_as_table()`.
+
+---
+
+### **4. Required Snowflake Objects**
+#### Create Regions Table:
+```sql
+CREATE TABLE REGIONS (
+    ID INT PRIMARY KEY,
+    REGION_NAME STRING
+);
+INSERT INTO REGIONS VALUES 
+(1, 'North America'),
+(2, 'Europe'),
+(3, 'Asia-Pacific');
+```
+
+#### Upload CSV to Stage:
+```sql
+PUT file:///path/to/sales.csv @MY_STAGE/data/;
+```
+
+---
+
+### **5. Automation Options**
+#### **Option 1: Schedule with Snowflake Task**
+```sql
+CREATE TASK run_sales_pipeline
+  WAREHOUSE = COMPUTE_WH
+  SCHEDULE = 'USING CRON 0 8 * * * UTC'
+AS
+  CALL SYSTEM$SEND_QUERY('EXECUTE SCRIPT ETL_SCRIPT;');
+```
+
+#### **Option 2: Run via Python Scheduler**
+Use `cron` or Airflow to trigger the script:
+```bash
+# Example: Run daily at 7 AM
+0 7 * * * /usr/bin/python3 /path/to/pipeline_script.py
+```
+
+---
+
+### **6. Best Practices**
+- **Error Handling**: Use `try-except` blocks and rollback on failure.
+- **Logging**: Log success/failure events for debugging.
+- **Performance**: Push transformations to Snowflake (avoid Pandas for large data).
+- **Security**: Store credentials in environment variables or secret managers.
+
+---
+
+This script demonstrates a **fully integrated Snowpark pipeline** that scales for large datasets while adhering to best practices. Replace placeholder values (e.g., `ACCOUNT`, `USER`) with your Snowflake credentials.
+
+---
+Here are detailed answers to the interview questions, structured to demonstrate technical knowledge and practical application:
+
+---
+
+### **1. Handling Missing Data in Pandas**
+**Key Techniques**:
+- **Identify Missing Values**:  
+  Use `isnull()` or `isna()` to detect missing values.  
+  ```python
+  df.isnull().sum()  # Count missing values per column
+  ```
+
+- **Drop Missing Values**:  
+  Use `dropna()` to remove rows/columns with missing values.  
+  ```python
+  df.dropna(inplace=True)  # Remove rows with any missing values
+  df.dropna(axis=1, thresh=100)  # Drop columns with <100 non-null values
+  ```
+
+- **Fill Missing Values**:  
+  Use `fillna()` with scalars, forward/backward fill, or statistical values.  
+  ```python
+  df.fillna(0, inplace=True)  # Fill with 0
+  df.fillna(df.mean(), inplace=True)  # Fill numeric NaNs with column means
+  df.fillna(method='ffill', inplace=True)  # Forward-fill missing values
+  ```
+
+- **Interpolate Missing Values**:  
+  Use `interpolate()` for time-series or linear interpolation.  
+  ```python
+  df.interpolate(method='linear', inplace=True)
+  ```
+
+**When to Use Each**:
+- Drop if missing data is <5% and random.
+- Fill with mean/median/mode for numerical data.
+- Use interpolation for time-series data.
+- Replace with domain-specific values (e.g., `"Unknown"` for categorical features).
+
+---
+
+### **2. Merge Two Datasets and Remove Duplicates**
+**Function to Merge and Deduplicate**:
+```python
+import pandas as pd
+
+def merge_and_deduplicate(df1: pd.DataFrame, df2: pd.DataFrame, key: str) -> pd.DataFrame:
+    """
+    Merges two datasets on a common key and removes duplicates.
+    
+    Args:
+        df1: First DataFrame
+        df2: Second DataFrame
+        key: Column name to merge on
+        
+    Returns:
+        Merged and deduplicated DataFrame
+    """
+    try:
+        # Merge datasets (outer join to retain all rows)
+        merged_df = pd.merge(df1, df2, on=key, how='outer')
+        
+        # Remove duplicates based on all columns
+        deduped_df = merged_df.drop_duplicates()
+        
+        return deduped_df
+    except Exception as e:
+        print(f"Error: {e}")
+        return pd.DataFrame()
+```
+
+**Example Usage**:
+```python
+df_a = pd.DataFrame({'id': [1, 2, 3], 'name': ['Alice', 'Bob', 'Charlie']})
+df_b = pd.DataFrame({'id': [2, 3, 4], 'age': [25, 30, 35]})
+
+result = merge_and_deduplicate(df_a, df_b, 'id')
+print(result)
+```
+
+**Output**:
+```
+   id     name   age
+0   1    Alice   NaN
+1   2      Bob  25.0
+2   3  Charlie  30.0
+3   4      NaN  35.0
+```
+
+**Notes**:
+- `drop_duplicates()` removes identical rows (based on all columns).
+- Adjust `subset=[cols]` to deduplicate on specific columns.
+- Handle missing values post-merge if needed (e.g., `fillna()`).
+
+---
+
+### **3. Optimize a Slow ETL Script for Millions of Rows**
+**Strategies for Optimization**:
+#### **A. Data Processing Optimization**
+1. **Use Efficient Data Types**:  
+   Downcast numeric types and use `category` for strings.  
+   ```python
+   df['column'] = df['column'].astype('category')  # Reduce memory usage
+   df['int_col'] = pd.to_numeric(df['int_col'], downcast='integer')
+   ```
+
+2. **Vectorized Operations**:  
+   Avoid loops; use Pandas/Numpy vectorization.  
+   ```python
+   # Slow
+   df['new_col'] = [x * 2 for x in df['old_col']]
+   
+   # Fast
+   df['new_col'] = df['old_col'] * 2
+   ```
+
+3. **Chunking for Large Files**:  
+   Process data in batches with `chunksize`.  
+   ```python
+   for chunk in pd.read_csv("large_file.csv", chunksize=100000):
+       process(chunk)  # Process 100k rows at a time
+   ```
+
+4. **Parallel Processing**:  
+   Use **Dask** or **PySpark** for distributed computing.  
+   ```python
+   import dask.dataframe as dd
+   df = dd.read_csv("huge_data.csv")
+   result = df.groupby("category").value.mean().compute()
+   ```
+
+#### **B. Database Optimization**
+1. **Bulk Loading**:  
+   Replace row-wise inserts with bulk operations.  
+   ```python
+   from snowflake.connector.pandas_tools import write_pandas
+   write_pandas(conn, df, "TARGET_TABLE")  # Bulk load to Snowflake
+   ```
+
+2. **Push Down Transformations**:  
+   Offload filtering/aggregation to SQL.  
+   ```sql
+   -- Instead of filtering in Python
+   SELECT * FROM source_table WHERE date > '2023-01-01'
+   ```
+
+#### **C. Code Profiling & Monitoring**
+1. **Profile Bottlenecks**:  
+   Use `cProfile` to identify slow functions.  
+   ```bash
+   python -m cProfile -s time etl_script.py
+   ```
+
+2. **Logging & Metrics**:  
+   Track execution time and memory usage.  
+   ```python
+   import logging
+   import time
+
+   start_time = time.time()
+   logging.info("Processing data...")
+   # Your code
+   logging.info(f"Completed in {time.time() - start_time:.2f} seconds")
+   ```
+
+#### **D. Infrastructure Scalability**
+1. **Snowpark for Large-Scale ETL**:  
+   Leverage Snowflake’s compute resources.  
+   ```python
+   session = Session.builder.configs(connection_params).create()
+   snow_df = session.read.parquet("@stage/data/")
+   snow_df.write.save_as_table("target_table")
+   ```
+
+2. **Cloud-Based Solutions**:  
+   Use AWS Glue, Azure Data Factory, or GCP Dataflow for serverless ETL.
+
+---
+
+### **Summary of Best Practices**
+| Area               | Optimization Strategy                          |
+|--------------------|-----------------------------------------------|
+| **Data Types**     | Use `category`, downcast integers/floats      |
+| **Vectorization**  | Avoid loops; use Pandas/Numpy ops             |
+| **Batch Processing**| Chunking for large datasets                   |
+| **Distributed Computing**| Dask, PySpark, or Snowpark               |
+| **Database**       | Bulk loads, push-down transformations         |
+| **Monitoring**     | Profile code, log metrics                     |
+
+By applying these strategies, you can reduce runtime from hours to minutes and scale ETL pipelines for big data.
+---
+Here’s a structured guide to **SQL** for data engineering, focusing on **general concepts** and **Snowflake-specific features**, with examples, optimization tips, and best practices.
+
+---
+
+### **1. Core SQL Queries**
+#### **SELECT Statements**
+- **Basic Query**:
+  ```sql
+  SELECT name, department, salary 
+  FROM employees 
+  WHERE salary > 50000 
+  ORDER BY salary DESC;
+  ```
+
+- **DISTINCT Values**:
+  ```sql
+  SELECT DISTINCT region 
+  FROM sales_data;
+  ```
+
+#### **JOINs**
+- **INNER JOIN**: Get matching rows from both tables.
+  ```sql
+  SELECT o.order_id, c.name
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id;
+  ```
+
+- **LEFT JOIN**: Include unmatched rows from the left table.
+  ```sql
+  SELECT c.name, o.order_id
+  FROM customers c
+  LEFT JOIN orders o ON c.id = o.customer_id;
+  ```
+
+- **SELF JOIN**: Compare rows within the same table.
+  ```sql
+  SELECT a.name AS employee, b.name AS manager
+  FROM employees a
+  INNER JOIN employees b ON a.manager_id = b.id;
+  ```
+
+#### **GROUP BY & Aggregation**
+- **Basic Aggregation**:
+  ```sql
+  SELECT department, 
+         COUNT(*) AS num_employees, 
+         AVG(salary) AS avg_salary
+  FROM employees
+  GROUP BY department;
+  ```
+
+- **HAVING Clause** (filter after aggregation):
+  ```sql
+  SELECT department, AVG(salary) AS avg_salary
+  FROM employees
+  GROUP BY department
+  HAVING AVG(salary) > 60000;
+  ```
+
+#### **Subqueries & CTEs**
+- **Subquery**:
+  ```sql
+  SELECT name, salary
+  FROM employees
+  WHERE salary > (SELECT AVG(salary) FROM employees);
+  ```
+
+- **Common Table Expression (CTE)**:
+  ```sql
+  WITH AvgSalary AS (
+    SELECT AVG(salary) AS avg_salary FROM employees
+  )
+  SELECT name, salary
+  FROM employees, AvgSalary
+  WHERE salary > AvgSalary.avg_salary;
+  ```
+
+#### **Window Functions**
+- **Ranking**:
+  ```sql
+  SELECT name, department, salary,
+         RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS rank
+  FROM employees;
+  ```
+
+- **Running Totals**:
+  ```sql
+  SELECT sale_date, amount,
+         SUM(amount) OVER (ORDER BY sale_date) AS running_total
+  FROM sales;
+  ```
+
+---
+
+### **2. Snowflake-Specific Features**
+#### **Time Travel (Data Recovery)**
+- Query historical data (within retention period, up to 90 days):
+  ```sql
+  -- Restore a dropped table
+  UNDROP TABLE sales_data;
+
+  -- Query data as of 1 hour ago
+  SELECT * FROM sales_data 
+  AT (TIMESTAMP => CURRENT_TIMESTAMP() - INTERVAL '1 HOUR');
+  ```
+
+#### **Semi-Structured Data (JSON/Parquet)**
+- **VARIANT Type**: Store JSON directly.
+  ```sql
+  CREATE TABLE logs (
+    id INT,
+    data VARIANT
+  );
+
+  -- Query JSON fields
+  SELECT data:name::STRING AS user_name,
+         data:address.city::STRING AS city
+  FROM logs;
+  ```
+
+- **FLATTEN Function**: Expand arrays in JSON.
+  ```sql
+  SELECT f.value::STRING AS item
+  FROM orders, LATERAL FLATTEN(input => data:items) f;
+  ```
+
+#### **Query Optimization in Snowflake**
+- **Clustering Keys** (for large tables):
+  ```sql
+  ALTER TABLE sales 
+  CLUSTER BY (region, sale_date);
+  ```
+
+- **Materialized Views**:
+  ```sql
+  CREATE MATERIALIZED VIEW sales_summary AS
+  SELECT region, SUM(amount) AS total_sales
+  FROM sales
+  GROUP BY region;
+  ```
+
+- **RESULT_SCAN**: Reuse cached query results.
+  ```sql
+  SET query_tag = 'cached_query';
+  SELECT * FROM large_table WHERE date = '2023-01-01';
+
+  -- Reuse cached result later
+  SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  ```
+
+---
+
+### **3. Performance Optimization**
+#### **Indexing (Snowflake Clustering vs. Traditional Indexes)**
+- **Traditional Databases** (e.g., PostgreSQL/MySQL):
+  ```sql
+  CREATE INDEX idx_customer_id ON orders(customer_id);
+  ```
+
+- **Snowflake Clustering Keys**:
+  ```sql
+  CREATE TABLE sales (
+    sale_id INT,
+    region STRING,
+    amount NUMBER
+  ) CLUSTER BY (region, sale_date);
+  ```
+
+#### **Partitioning**
+- **Range Partitioning** (e.g., by date):
+  ```sql
+  CREATE TABLE sales (
+    sale_date DATE,
+    amount NUMBER
+  ) PARTITION BY RANGE (sale_date) (
+    PARTITION p_2023_01 VALUES LESS THAN ('2023-02-01'),
+    PARTITION p_2023_02 VALUES LESS THAN ('2023-03-01')
+  );
+  ```
+
+- **List Partitioning** (e.g., by region):
+  ```sql
+  CREATE TABLE sales (
+    region STRING,
+    amount NUMBER
+  ) PARTITION BY LIST (region) (
+    PARTITION p_na VALUES IN ('US', 'CA'),
+    PARTITION p_eu VALUES IN ('UK', 'DE')
+  );
+  ```
+
+---
+
+### **4. Data Modeling**
+#### **Star Schema**
+- **Fact Table**: Core metrics (e.g., sales).
+- **Dimension Tables**: Descriptive data (e.g., customers, products).
+
+**Example**:
+```sql
+-- Fact Table
+CREATE TABLE fact_sales (
+  sale_id INT,
+  customer_id INT,
+  product_id INT,
+  amount DECIMAL(10,2)
+);
+
+-- Dimension Table
+CREATE TABLE dim_customers (
+  customer_id INT PRIMARY KEY,
+  name STRING,
+  region STRING
+);
+```
+
+#### **Normalization vs. Denormalization**
+- **Normalization** (reduce redundancy):
+  ```sql
+  -- Customers in one table, orders in another
+  SELECT * FROM customers c
+  JOIN orders o ON c.id = o.customer_id;
+  ```
+
+- **Denormalization** (optimize for reads):
+  ```sql
+  -- Single table with redundant customer info
+  CREATE TABLE denormalized_sales (
+    sale_id INT,
+    customer_name STRING,
+    customer_region STRING,
+    amount DECIMAL(10,2)
+  );
+  ```
+
+#### **When to Use Which?**
+- **Normalized**: OLTP - Online Transaction Processing systems (frequent writes, data integrity).
+- **Denormalized**: OLAP - Online Analytical Processing systems (complex queries, read-heavy workloads).
+
+- **Normalization** is about organizing your information neatly in separate places to avoid repetition and ensure accuracy, especially when you have lots of changes happening.
+- **Denormalization** is about putting information together in one place to make it faster to look up and analyze, even if it means repeating some information. You choose based on whether you do more writing/changing of data or more reading/analyzing of data.
+
+---
+
+### **5. Best Practices**
+#### **General SQL**
+- Use `EXPLAIN ANALYZE` to debug query plans.
+- Avoid `SELECT *`; select only required columns.
+- Filter early with `WHERE` to reduce data processed.
+
+#### **Snowflake**
+- Use **clustering keys** for large tables.
+- Leverage **materialized views** for pre-aggregated data.
+- Use **stages** (`@stage`) for bulk data loading.
+
+#### **Performance**
+- Partition tables by date or region.
+- Use appropriate **data types** (e.g., `DATE` instead of `STRING`).
+- Use **bulk operations** instead of row-wise inserts.
+
+#### **Common Pitfalls**
+- **Unbounded Window Frames**: Always specify `ROWS BETWEEN`.
+- **Overusing DISTINCT**: Often a sign of incorrect JOINs.
+- **Ignoring NULLs**: Use `COALESCE` or `IFNULL` for safer logic.
+
+---
+
+### **6. Example: Optimized Snowflake ELT**
+```sql
+-- Stage raw CSV data
+CREATE STAGE sales_stage 
+  URL = 's3://my-bucket/sales/'
+  CREDENTIALS = (AWS_KEY_ID='...' AWS_SECRET_KEY='...');
+
+-- Load into Snowflake table
+COPY INTO raw_sales 
+FROM @sales_stage 
+FILE_FORMAT = (TYPE = 'CSV' SKIP_HEADER = 1);
+
+-- Transform with clustering
+CREATE OR REPLACE TABLE cleaned_sales CLUSTER BY (sale_date) AS
+SELECT 
+  sale_id,
+  sale_date,
+  region,
+  amount * 1.1 AS adjusted_amount  -- Add tax
+FROM raw_sales
+WHERE amount > 0;
+
+-- Schedule refresh with a task
+CREATE TASK refresh_cleaned_sales
+  WAREHOUSE = compute_wh
+  SCHEDULE = 'USING CRON 0 8 * * * UTC'
+AS
+  INSERT INTO cleaned_sales SELECT ...;
+```
+
+---
+
+By combining **SQL fundamentals** with **Snowflake’s cloud-native features**, you can build scalable, high-performance data pipelines. Always pair query optimization with proper schema design and Snowflake-specific tools like clustering and time travel.
