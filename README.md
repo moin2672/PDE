@@ -689,3 +689,518 @@ AS
 ---
 
 By leveraging Snowflake’s architecture, optimized querying, and governance features, you can build scalable, high-performance data solutions. Pair it with Snowpark for advanced analytics and automation workflows.
+
+## **SQL:** Writing efficient queries for data manipulation and analysis.
+Here’s a comprehensive guide to writing **efficient SQL queries** for data manipulation and analysis, with best practices, optimization tips, and examples.
+
+---
+
+### **1. Query Structure Basics**
+#### **SELECT Statements**
+- Use explicit column names instead of `SELECT *`:
+  ```sql
+  -- Avoid
+  SELECT * FROM employees;
+
+  -- Prefer
+  SELECT id, name, department FROM employees;
+  ```
+  ```python
+  # ❌ Avoid: Fetches ALL columns (not efficient or explicit)
+  df = session.table("employees")
+  df.show()
+
+
+  from snowflake.snowpark.functions import col
+
+  # ✅ Explicitly select only required columns
+  df = session.table("employees").select(
+    col("id"),
+    col("name"),
+    col("department")
+  )
+  df.show()
+
+  # ✅ Also valid for simple column names
+  df = session.table("employees").select("id", "name", "department")
+  df.show()
+  ```
+
+- Filter early with `WHERE` to reduce data processed:
+  ```sql
+  SELECT * FROM sales 
+  WHERE sale_date >= '2023-01-01';
+  ```
+  ```python
+  # Filter early to reduce data
+  df = session.table("sales").filter(col("sale_date") >= "2023-01-01")
+  df.show()
+  ```
+
+- Use `LIMIT` to test queries on small datasets:
+  ```sql
+  SELECT * FROM large_table LIMIT 100;
+  ```
+  ```python
+  # Test on small data
+  df = session.table("large_table").limit(100)
+  df.show()
+  ```
+
+---
+
+### **2. Efficient JOINs**
+- **Prefer INNER JOIN** unless you need unmatched rows:
+  ```sql
+  -- Get orders with customer info
+  SELECT o.order_id, c.name
+  FROM orders o
+  INNER JOIN customers c ON o.customer_id = c.id;
+  ```
+  ```python
+  # Join orders with customers
+  orders = session.table("orders")
+  customers = session.table("customers")
+
+  joined_df = orders.join(
+    customers,
+    orders["customer_id"] == customers["id"],
+    how="inner"
+  ).select(orders["order_id"], customers["name"])
+  joined_df.show()
+  ```
+
+- **Avoid Cartesian Products** (unintended cross joins):
+  ```sql
+  -- Bad: No JOIN condition!
+  SELECT * FROM orders, customers;
+
+  -- Good: Always specify ON or USING
+  SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id;
+  ```
+  ```python
+  # Always specify join condition
+  joined_df = orders.join(
+    customers,
+    orders["customer_id"] == customers["id"],
+    how="inner"
+  )
+  ```
+
+- **Use LEFT JOIN for Optional Relationships**:
+  ```sql
+  -- Get all customers, even those without orders
+  SELECT c.name, o.order_id
+  FROM customers c
+  LEFT JOIN orders o ON c.id = o.customer_id;
+  ```
+  ```python
+  # Get all customers, even without orders
+  joined_df = customers.join(
+    orders,
+    customers["id"] == orders["customer_id"],
+    how="left"
+  ).select(customers["name"], orders["order_id"])
+  joined_df.show()
+  ```
+
+---
+
+### **3. Aggregation & Filtering**
+- Use `GROUP BY` for summaries and `HAVING` for post-aggregation filtering:
+  ```sql
+  -- Total sales per region, filtering regions with > $1M
+  SELECT region, SUM(amount) AS total_sales
+  FROM sales
+  GROUP BY region
+  HAVING SUM(amount) > 1000000;
+  ```
+  ```python
+  from snowflake.snowpark.functions import sum as snow_sum
+
+  # Total sales per region with HAVING
+  sales_df = session.table("sales")
+
+  agg_df = sales_df.group_by("region").agg(
+    snow_sum("amount").alias("total_sales")
+  ).filter(snow_sum("amount") > 1_000_000)
+
+  agg_df.show()
+  ```
+
+- Avoid unnecessary columns in `GROUP BY`:
+  ```sql
+  -- Bad: Extra column forces grouping
+  SELECT region, product_id, SUM(amount)
+  FROM sales
+  GROUP BY region, product_id;
+
+  -- Better: Only group by necessary columns
+  SELECT region, SUM(amount)
+  FROM sales
+  GROUP BY region;
+  ```
+  ```python
+  # Only group by necessary columns
+  agg_df = sales_df.group_by("region").agg(
+    snow_sum("amount").alias("total_sales")
+  )
+  ```
+
+---
+
+### **4. Subqueries vs. Common Table Expressions (CTEs)**
+- **Subqueries** (use for simple nested logic):
+  ```sql
+  -- Find employees earning more than average
+  SELECT name, salary
+  FROM employees
+  WHERE salary > (SELECT AVG(salary) FROM employees);
+  ```
+  ```python
+  # Find employees earning more than average
+  avg_salary = (session.table("employees")
+              .select(snow_avg("salary")).first()[0])
+
+  high_earners = session.table("employees").filter(
+    col("salary") > avg_salary
+  ).select("name", "salary")
+  ```
+
+- **CTEs** (use for readability and reuse):
+  ```sql
+  WITH AvgSalary AS (
+    SELECT AVG(salary) AS avg_salary FROM employees
+  )
+  SELECT e.name, e.salary
+  FROM employees e, AvgSalary a
+  WHERE e.salary > a.avg_salary;
+  ```
+  ```python
+  from snowflake.snowpark.functions import avg as snow_avg
+
+  # With CTE
+  avg_salary_cte = (session.table("employees")
+                  .select(snow_avg("salary").alias("avg_salary")))
+
+  high_earners = (session.table("employees")
+                .join(avg_salary_cte, how="cross")
+                .filter(col("salary") > col("avg_salary"))
+                .select(col("name"), col("salary")))
+  ```
+
+---
+
+### **5. Indexing for Speed**
+- **Create indexes on**:
+  - Primary/foreign keys.
+  - Columns used in `WHERE`, `JOIN`, or `ORDER BY`.
+  ```sql
+  CREATE INDEX idx_customer_id ON orders(customer_id);
+  ```
+
+- **Avoid over-indexing**: Too many indexes slow down `INSERT`/`UPDATE`.
+- **Use composite indexes** for multi-column filters:
+  ```sql
+  CREATE INDEX idx_region_date ON sales(region, sale_date);
+  ```
+
+---
+
+### **6. Optimization Techniques**
+- **Use EXISTS Instead of IN** for better performance:
+  ```sql
+  -- Prefer EXISTS
+  SELECT name FROM customers c
+  WHERE EXISTS (
+    SELECT 1 FROM orders o WHERE o.customer_id = c.id
+  );
+
+  -- Avoid IN with subqueries
+  SELECT name FROM customers
+  WHERE id IN (SELECT customer_id FROM orders);
+  ```
+  ```python
+  # Use exists() for better performance
+  orders_subquery = (session.table("orders")
+                   .select("customer_id").distinct())
+
+  customers_with_orders = (session.table("customers")
+                         .join(orders_subquery, 
+                               on=col("id") == col("customer_id"),
+                               how="inner")
+                         .select("name"))
+  ```
+
+- **Avoid Functions on Indexed Columns**:
+  ```sql
+  -- Bad: Prevents index use
+  SELECT * FROM sales WHERE DATE(sale_date) = '2023-01-01';
+
+  -- Good: Sargable condition
+  SELECT * FROM sales 
+  WHERE sale_date >= '2023-01-01' AND sale_date < '2023-01-02';
+  ```
+  ```python
+  # Sargable condition
+  filtered_df = session.table("sales").filter(
+    (col("sale_date") >= "2023-01-01") &
+    (col("sale_date") < "2023-01-02")
+  )
+  ```
+
+- **Use UNION ALL Instead of UNION** when duplicates aren’t an issue:
+  ```sql
+  -- UNION ALL skips duplicate checks
+  SELECT name FROM employees
+  UNION ALL
+  SELECT name FROM contractors;
+  ```
+  ```python
+  # Union without deduplication
+  combined_df = (session.table("employees")
+               .select("name")
+               .union_all(session.table("contractors").select("name")))
+  ```
+
+---
+
+### **7. Execution Plan Analysis**
+- Use `EXPLAIN` or `EXPLAIN ANALYZE` to debug performance:
+  ```sql
+  EXPLAIN ANALYZE
+  SELECT * FROM sales WHERE region = 'APAC';
+  ```
+
+- Look for:
+  - Full table scans (bad).
+  - Index usage (good).
+  - High-cost operations like sorts or hashes.
+
+---
+
+### **8. Data Manipulation (DML)**
+- **INSERT Efficiently**:
+  ```sql
+  -- Bulk insert
+  INSERT INTO logs (user_id, action)
+  SELECT user_id, 'login' FROM active_users;
+  ```
+  ```python
+  # Use SQL for DML
+  session.sql("""
+    INSERT INTO logs (user_id, action)
+    SELECT user_id, 'login' FROM active_users
+  """).collect()
+  ```
+
+- **UPDATE with Care**:
+  ```sql
+  -- Always use WHERE to avoid full-table updates
+  UPDATE employees
+  SET salary = salary * 1.1
+  WHERE department = 'Engineering';
+  ```
+  ```python
+  session.sql("""
+    UPDATE employees
+    SET salary = salary * 1.1
+    WHERE department = 'Engineering'
+  """).collect()
+  ```
+
+- **DELETE vs. TRUNCATE**:
+  ```sql
+  TRUNCATE TABLE temp_data; -- Faster than DELETE for full tables
+  ```
+  ```python
+  session.sql("TRUNCATE TABLE temp_data").collect()
+  ```
+
+---
+
+### **9. Advanced Analysis with Window Functions**
+- **Ranking**:
+  ```sql
+  -- Top 3 earners per department
+  SELECT name, department, salary
+  FROM (
+    SELECT *, 
+      RANK() OVER (PARTITION BY department ORDER BY salary DESC) as rk
+    FROM employees
+  ) ranked
+  WHERE rk <= 3;
+  ```
+  ```python
+  from snowflake.snowpark.window import Window
+  from snowflake.snowpark.functions import rank
+
+  # Rank employees by salary
+  window_spec = Window.partition_by("department").order_by(col("salary").desc())
+
+  ranked_df = (session.table("employees")
+             .select(
+                 col("name"),
+                 col("department"),
+                 col("salary"),
+                 rank().over(window_spec).alias("rk")
+             ).filter(col("rk") <= 3))
+  ```
+
+- **Running Totals**:
+  ```sql
+  -- Cumulative sales by region
+  SELECT sale_date, region, amount,
+    SUM(amount) OVER (PARTITION BY region ORDER BY sale_date) AS running_total
+  FROM sales;
+  ```
+  ```python
+  # Cumulative sales by region
+  window_spec = (Window.partition_by("region")
+               .order_by("sale_date")
+               .rows_between(Window.unboundedPreceding, Window.currentRow))
+
+  running_total_df = (session.table("sales")
+                    .select(
+                        col("sale_date"),
+                        col("region"),
+                        col("amount"),
+                        snow_sum("amount").over(window_spec).alias("running_total")
+                    ))
+  ```
+
+- **Time Series Gaps & Islands**:
+  ```sql
+  -- Find consecutive login dates
+  WITH Logins AS (
+    SELECT user_id, login_date,
+      DATE_SUB(login_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY login_date)) AS grp
+    FROM user_logins
+  )
+  SELECT user_id, MIN(login_date), MAX(login_date)
+  FROM Logins
+  GROUP BY user_id, grp;
+  ```
+  
+
+---
+
+### **10. Best Practices**
+1. **Format for Readability**:
+   ```sql
+   SELECT 
+     o.order_id,
+     c.name AS customer_name,
+     SUM(oi.quantity * oi.price) AS total_amount
+   FROM orders o
+   JOIN customers c ON o.customer_id = c.id
+   JOIN order_items oi ON o.order_id = oi.order_id
+   GROUP BY o.order_id, c.name;
+   ```
+   ```python
+   # Chain operations for clarity
+   result_df = (session.table("orders")
+             .join(session.table("customers"), 
+                   on=col("customer_id") == col("id"), 
+                   how="inner")
+             .join(session.table("order_items"), 
+                   on=col("order_id") == col("order_id"), 
+                   how="inner")
+             .group_by(col("order_id"), col("name"))
+             .agg(snow_sum(col("quantity") * col("price")).alias("total_amount"))))
+   ```
+
+2. **Parameterize Queries** to prevent SQL injection:
+   ```sql
+   -- Use placeholders (language-specific)
+   SELECT * FROM users WHERE id = %s; -- Python example
+   ```
+   
+   ```python
+   # Use Python f-strings or bind variables
+   user_id = 123
+   session.sql(f"SELECT * FROM users WHERE id = {user_id}").collect()
+   ```
+
+3. **Version Control** your SQL scripts (e.g., Git).
+
+4. **Test on Small Data** before scaling.
+
+5. **Leverage Database-Specific Features**:
+   - **Snowflake**: Use `RESULT_SCAN`, clustering keys, and `STAGE` for external data.
+   - **PostgreSQL**: Use `EXPLAIN ANALYZE`, `JSONB`, and `MATERIALIZED VIEWS`.
+   - **BigQuery**: Use partitioned tables and `ARRAY_AGG`.
+
+---
+
+### **11. Common Pitfalls to Avoid**
+- **N+1 Queries**: Fetching data row-by-row instead of joining.
+- **Overusing DISTINCT**: Often a sign of incorrect JOINs.
+- **Ignoring NULLs**: Use `COALESCE` or `IFNULL` where needed.
+- **Unbounded Window Frames**: Specify `ROWS BETWEEN` for performance.
+
+---
+
+### **12. Example: Optimized Analysis Workflow**
+```sql
+-- Step 1: Identify high-value customers
+WITH HighValueCustomers AS (
+  SELECT customer_id
+  FROM orders
+  GROUP BY customer_id
+  HAVING SUM(amount) > 10000
+)
+
+-- Step 2: Get their recent purchases
+SELECT c.name, o.order_id, o.amount
+FROM customers c
+JOIN orders o ON c.id = o.customer_id
+WHERE c.id IN (SELECT customer_id FROM HighValueCustomers)
+  AND o.order_date >= '2023-01-01'
+ORDER BY o.amount DESC
+LIMIT 100;
+```
+```python
+from snowflake.snowpark.functions import col, sum as snow_sum
+
+# Load orders table
+orders_df = session.table("orders")
+
+# Step 1: Find customers with total orders > $10,000
+high_value_customers = (
+    orders_df.group_by("customer_id")
+    .agg(snow_sum("amount").alias("total_amount"))
+    .filter(col("total_amount") > 10000)
+    .select("customer_id")
+)
+
+# Load customers table
+customers_df = session.table("customers")
+
+# Join customers with orders and filter for high-value customers
+recent_purchases = (
+    customers_df.alias("c")
+    .join(
+        orders_df.alias("o"),
+        col("c.id") == col("o.customer_id"),
+        how="inner"
+    )
+    .filter(
+        col("o.order_date") >= "2023-01-01",
+        col("c.id").isin(high_value_customers.select("customer_id"))
+    )
+    .select(
+        col("c.name").alias("customer_name"),
+        col("o.order_id"),
+        col("o.amount")
+    )
+    .order_by(col("o.amount").desc())
+    .limit(100)
+)
+
+# Show the result
+recent_purchases.show()
+```
+---
+
+By applying these techniques, you’ll write **faster, cleaner, and more maintainable SQL** for both transactional and analytical workloads. Always combine query optimization with proper indexing and schema design for maximum efficiency.
